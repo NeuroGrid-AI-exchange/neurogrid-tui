@@ -1,0 +1,23 @@
+[project]
+name = "mantui"
+version = "0.1.0"
+description = "Terminal UI (TUI) for chatting with OpenAI models, managing sessions, and running MCP servers from your terminal"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "asciimatics>=1.15.0",
+    "openai>=2.50.0",
+    "platformdirs>=4.11.0",
+    "pydantic>=2.13.4",
+    "prompt-toolkit>=3.0.52",
+    "rich>=15.0.0",
+    "textual>=8.2.8",
+]
+
+[project.scripts]
+mantui = "mantui.app:main"
+mantui-mcp = "mantui.workspace.mcp_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
