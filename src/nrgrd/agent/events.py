@@ -42,7 +42,15 @@ class ToolCallDenied:
 
 @dataclass(frozen=True)
 class AgentError:
+    """A failure, split so the interface can render it usefully.
+
+    ``message`` says what happened, ``detail`` shows the configuration
+    involved, and ``hint`` says what to do next.
+    """
+
     message: str
+    detail: str = ""
+    hint: str = ""
 
 
 @dataclass(frozen=True)

@@ -15,12 +15,19 @@ class Config(BaseModel):
 
     api_key: str = Field(
         default="",
-        description="API key for the OpenAI-compatible API.",
+        description=(
+            "Legacy plaintext API key. Kept only so an existing config can "
+            "be migrated into the credential store on startup; it is blanked "
+            "once moved and never written back. See config/credentials.py."
+        ),
     )
 
     base_url: str = Field(
-        default="http://localhost:8000/v1",
-        description="Base URL for the OpenAI-compatible API.",
+        default="",
+        description=(
+            "Endpoint of the OpenAI-compatible API (a NeuroGrid deployment, "
+            "vLLM, Ollama, LM Studio, ...). Usually ends in /v1."
+        ),
     )
 
     model: str = Field(

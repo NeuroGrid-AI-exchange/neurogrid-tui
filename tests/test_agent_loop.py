@@ -7,6 +7,7 @@ from nrgrd.agent import (
     ToolCallDenied,
     ToolCallOutput,
 )
+from nrgrd.api.provider import ProviderError
 from nrgrd.tools.registry import PermissionLevel, Tool, ToolRegistry
 
 
@@ -17,19 +18,19 @@ def registry_with(*tools: Tool) -> ToolRegistry:
     return registry
 
 
-def test_plain_reply_with_no_tool_calls(fake_client, chunk):
-    client = fake_client([[chunk(content="Hello "), chunk(content="there.")]])
-    agent = Agent(client, "test-model", ToolRegistry())
+def test_plain_reply_with_no_tool_calls(fake_provider, delta):
+    provider = fake_provider([[delta(content="Hello "), delta(content="there.")]])
+    agent = Agent(provider, "test-model", ToolRegistry())
 
     events = list(agent.run([{"role": "user", "content": "hi"}]))
 
     assert isinstance(events[0], AgentStarted)
     assert isinstance(events[-1], AgentFinished)
     assert events[-1].text == "Hello there."
-    assert len(client.calls) == 1
+    assert len(provider.calls) == 1
 
 
-def test_allowed_tool_call_executes_and_feeds_result_back(fake_client, chunk):
+def test_allowed_tool_call_executes_and_feeds_result_back(fake_provider, delta):
     read_file = Tool(
         "read_file",
         "read",
@@ -37,13 +38,13 @@ def test_allowed_tool_call_executes_and_feeds_result_back(fake_client, chunk):
         PermissionLevel.ALLOW,
         lambda arguments: "FILE CONTENTS",
     )
-    client = fake_client(
+    provider = fake_provider(
         [
-            [chunk(tool_name="read_file", tool_args="{}", tool_id="call_1")],
-            [chunk(content="Done.")],
+            [delta(tool_name="read_file", tool_args="{}", tool_id="call_1")],
+            [delta(content="Done.")],
         ]
     )
-    agent = Agent(client, "test-model", registry_with(read_file))
+    agent = Agent(provider, "test-model", registry_with(read_file))
     messages = [{"role": "user", "content": "read it"}]
 
     events = list(agent.run(messages))
@@ -66,7 +67,7 @@ def test_allowed_tool_call_executes_and_feeds_result_back(fake_client, chunk):
     }
 
 
-def test_ask_level_tool_denied_by_permission_manager_never_executes(fake_client, chunk):
+def test_ask_level_tool_denied_by_permission_manager_never_executes(fake_provider, delta):
     executed = []
     shell = Tool(
         "shell",
@@ -75,14 +76,14 @@ def test_ask_level_tool_denied_by_permission_manager_never_executes(fake_client,
         PermissionLevel.ASK,
         lambda arguments: executed.append(arguments) or "should not run",
     )
-    client = fake_client(
+    provider = fake_provider(
         [
-            [chunk(tool_name="shell", tool_args="{}", tool_id="call_1")],
-            [chunk(content="Understood.")],
+            [delta(tool_name="shell", tool_args="{}", tool_id="call_1")],
+            [delta(content="Understood.")],
         ]
     )
     permissions = PermissionManager(callback=lambda name, args: "no")
-    agent = Agent(client, "test-model", registry_with(shell), permissions=permissions)
+    agent = Agent(provider, "test-model", registry_with(shell), permissions=permissions)
 
     events = list(agent.run([{"role": "user", "content": "rm -rf /"}]))
 
@@ -91,24 +92,42 @@ def test_ask_level_tool_denied_by_permission_manager_never_executes(fake_client,
     assert not any(isinstance(event, ToolCallOutput) for event in events)
 
 
-def test_provider_error_yields_agent_error_and_stops():
-    class BrokenCompletions:
-        def create(self, **kwargs):
-            raise RuntimeError("endpoint unreachable")
+def test_provider_error_is_surfaced_with_its_detail_and_hint(fake_provider):
+    class BrokenProvider(fake_provider):
+        def stream_chat(self, model, messages, tools=None):
+            raise ProviderError(
+                "Could not reach the endpoint.",
+                "Endpoint: http://fake.invalid/v1\nModel: test-model",
+                "Check the URL is right.",
+            )
+            yield  # pragma: no cover - generator marker
 
-    class BrokenClient:
-        def __init__(self) -> None:
-            self.chat = type("Chat", (), {"completions": BrokenCompletions()})()
+    agent = Agent(BrokenProvider([]), "test-model", ToolRegistry())
 
-    agent = Agent(BrokenClient(), "test-model", ToolRegistry())
+    events = list(agent.run([{"role": "user", "content": "hi"}]))
+
+    error = events[-1]
+    assert isinstance(error, AgentError)
+    assert error.message == "Could not reach the endpoint."
+    assert "http://fake.invalid/v1" in error.detail
+    assert error.hint == "Check the URL is right."
+
+
+def test_unexpected_error_still_stops_the_loop(fake_provider):
+    class ExplodingProvider(fake_provider):
+        def stream_chat(self, model, messages, tools=None):
+            raise RuntimeError("something unexpected")
+            yield  # pragma: no cover - generator marker
+
+    agent = Agent(ExplodingProvider([]), "test-model", ToolRegistry())
 
     events = list(agent.run([{"role": "user", "content": "hi"}]))
 
     assert isinstance(events[-1], AgentError)
-    assert "endpoint unreachable" in events[-1].message
+    assert "something unexpected" in events[-1].message
 
 
-def test_tool_call_limit_reached_yields_agent_error(fake_client, chunk):
+def test_tool_call_limit_reached_yields_agent_error(fake_provider, delta):
     always_calls_tool = Tool(
         "shell",
         "run",
@@ -117,11 +136,11 @@ def test_tool_call_limit_reached_yields_agent_error(fake_client, chunk):
         lambda arguments: "ok",
     )
     turns = [
-        [chunk(tool_name="shell", tool_args="{}", tool_id=f"call_{i}")]
+        [delta(tool_name="shell", tool_args="{}", tool_id=f"call_{i}")]
         for i in range(20)
     ]
-    client = fake_client(turns)
-    agent = Agent(client, "test-model", registry_with(always_calls_tool), max_iterations=3)
+    provider = fake_provider(turns)
+    agent = Agent(provider, "test-model", registry_with(always_calls_tool), max_iterations=3)
 
     events = list(agent.run([{"role": "user", "content": "loop forever"}]))
 
