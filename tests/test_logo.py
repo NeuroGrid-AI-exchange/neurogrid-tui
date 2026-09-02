@@ -27,8 +27,32 @@ def test_animation_reveals_connections_progressively():
     assert connection_counts[-1] > connection_counts[0]
 
 
-def test_centre_node_charges_before_firing():
-    frames = logo_frames()
+def test_centre_charges_before_any_connection_fires():
+    """The grid wakes, then the centre charges, then it fires — in order."""
+    frames = [frame.plain for frame in logo_frames()]
 
-    assert "O" not in frames[0].plain
-    assert all("O" in frame.plain for frame in frames[1:])
+    first_charged = next(
+        index for index, frame in enumerate(frames) if "O" in frame or "●" in frame
+    )
+    first_fired = next(
+        index for index, frame in enumerate(frames) if "\\" in frame or "/" in frame
+    )
+
+    assert first_charged < first_fired
+    # Once charged, the centre stays charged for the rest of the animation.
+    assert all("O" in frame or "●" in frame for frame in frames[first_charged:])
+
+
+def test_nodes_flicker_through_other_glyphs_while_waking():
+    """The wake-up is a glyph churn, not just a fade."""
+    waking = {"·", "∘", "◦", "*", "+", "."}
+    frames = [frame.plain for frame in logo_frames()]
+
+    assert any(waking & set(frame) for frame in frames), (
+        "no frame used the waking glyphs, so nothing visibly changes"
+    )
+
+
+def test_animation_is_deterministic():
+    """A seeded animation means every launch looks the same."""
+    assert [f.plain for f in logo_frames()] == [f.plain for f in logo_frames()]

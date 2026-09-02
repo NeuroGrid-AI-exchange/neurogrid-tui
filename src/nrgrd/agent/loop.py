@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from nrgrd.agent.events import (
+    AgentCancelled,
     AgentError,
     AgentEvent,
     AgentFinished,
@@ -69,6 +70,11 @@ class Agent:
                             item["name"] += call.name
                         if call.arguments:
                             item["arguments"] += call.arguments
+            except KeyboardInterrupt:
+                # Keep the partial reply: it is context the user may still
+                # want, and dropping it mid-turn loses their work.
+                yield AgentCancelled(response_text)
+                return
             except ProviderError as error:
                 yield AgentError(error.summary, error.detail, error.hint)
                 return
@@ -99,18 +105,33 @@ class Agent:
                 }
             )
 
+            cancelled = False
             for call in calls:
                 name, arguments = call["name"], call["arguments"]
-                tool = self.tool_registry.get(name)
-                level = tool.permission if tool else PermissionLevel.ASK
 
-                if not self.permissions.check(name, arguments, level):
-                    result = "Permission denied by the user."
-                    yield ToolCallDenied(name, arguments)
+                if cancelled:
+                    # Interrupted earlier in this batch: run nothing further,
+                    # but still answer the call. An assistant message whose
+                    # tool_calls are not all answered is rejected by the
+                    # endpoint, so a half-filled batch would poison the
+                    # conversation rather than simply end it.
+                    result = "Cancelled by the user."
                 else:
-                    yield ToolCallStarted(name, arguments)
-                    result = self.tool_registry.execute(name, arguments)
-                    yield ToolCallOutput(name, result)
+                    tool = self.tool_registry.get(name)
+                    level = tool.permission if tool else PermissionLevel.ASK
+
+                    if not self.permissions.check(name, arguments, level):
+                        result = "Permission denied by the user."
+                        yield ToolCallDenied(name, arguments)
+                    else:
+                        yield ToolCallStarted(name, arguments)
+                        try:
+                            result = self.tool_registry.execute(name, arguments)
+                        except KeyboardInterrupt:
+                            cancelled = True
+                            result = "Cancelled by the user."
+                        else:
+                            yield ToolCallOutput(name, result)
 
                 messages.append(
                     {
@@ -119,6 +140,10 @@ class Agent:
                         "content": result,
                     }
                 )
+
+            if cancelled:
+                yield AgentCancelled(response_text)
+                return
 
         yield AgentError(
             "Tool call limit reached; please continue with a narrower request."

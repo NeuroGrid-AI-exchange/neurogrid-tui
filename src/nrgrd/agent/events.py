@@ -54,12 +54,20 @@ class AgentError:
 
 
 @dataclass(frozen=True)
+class AgentCancelled:
+    """The user interrupted. ``text`` is whatever had been generated."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class AgentFinished:
     text: str
 
 
 AgentEvent = (
     AgentStarted
+    | AgentCancelled
     | AssistantChunk
     | ToolCallStarted
     | ToolCallOutput

@@ -50,6 +50,34 @@ def test_completed_screen_saves_endpoint_model_and_key(monkeypatch, tmp_path):
     assert saved["api_key"] == ""
 
 
+def test_a_single_model_is_selected_without_asking(monkeypatch):
+    """The common NeuroGrid case: one deployment, one model, no question.
+
+    Only two answers are scripted, so a third prompt would raise
+    StopIteration and fail this test.
+    """
+    monkeypatch.setattr(connect, "save_config", lambda config: None)
+    stub_models(monkeypatch, ["qwen3-coder"])
+    answer_with(monkeypatch, ["https://deploy.example/v1", "the-key"])
+
+    config = Config()
+    result = connect.run_connect_screen(quiet_console(), config, MemoryStore())
+
+    assert result == "the-key"
+    assert config.model == "qwen3-coder"
+
+
+def test_several_models_still_ask(monkeypatch):
+    monkeypatch.setattr(connect, "save_config", lambda config: None)
+    stub_models(monkeypatch, ["a-model", "b-model"])
+    answer_with(monkeypatch, ["https://x/v1", "k", "1"])
+
+    config = Config()
+    connect.run_connect_screen(quiet_console(), config, MemoryStore())
+
+    assert config.model == "a-model"
+
+
 def test_model_can_be_chosen_by_name(monkeypatch):
     monkeypatch.setattr(connect, "save_config", lambda config: None)
     stub_models(monkeypatch, ["a-model", "b-model"])

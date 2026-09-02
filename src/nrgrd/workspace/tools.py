@@ -6,6 +6,9 @@ from typing import Any
 
 
 MAX_FILE_BYTES = 200_000
+# A file is read in slices: a whole large file would swamp the context
+# window, which is usually much smaller than the file itself.
+MAX_READ_LINES = 400
 MAX_RESULTS = 200
 IGNORED_DIRECTORIES = {".git", ".venv", "__pycache__", ".mypy_cache"}
 
@@ -26,10 +29,23 @@ FILE_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a UTF-8 text file inside the workspace.",
+            "description": (
+                "Read a UTF-8 text file inside the workspace. Output is "
+                "line-numbered. Use offset/limit to read part of a large file."
+            ),
             "parameters": {
                 "type": "object",
-                "properties": {"path": {"type": "string"}},
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {
+                        "type": "integer",
+                        "description": "1-based first line to read.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "How many lines to read.",
+                    },
+                },
                 "required": ["path"],
             },
         },
@@ -95,7 +111,11 @@ class WorkspaceTools:
             if name == "list_files":
                 return self.list_files(payload.get("path", "."))
             if name == "read_file":
-                return self.read_file(payload["path"])
+                return self.read_file(
+                    payload["path"],
+                    payload.get("offset"),
+                    payload.get("limit"),
+                )
             if name == "write_file":
                 return self.write_file(payload["path"], payload["content"])
             if name == "edit_file":
@@ -132,13 +152,54 @@ class WorkspaceTools:
                 break
         return "\n".join(entries) or "Directory is empty."
 
-    def read_file(self, user_path: str) -> str:
+    def read_file(
+        self,
+        user_path: str,
+        offset: int | None = None,
+        limit: int | None = None,
+    ) -> str:
+        """Return a line-numbered slice of a text file.
+
+        Defaults to the first ``MAX_READ_LINES`` lines. A whole large file
+        is never returned at once: it would eat a context window that is
+        typically far smaller than the file.
+        """
         path = self.resolve(user_path)
         if not path.is_file():
             return "File does not exist."
         if path.stat().st_size > MAX_FILE_BYTES:
-            return f"File exceeds {MAX_FILE_BYTES} byte read limit."
-        return path.read_text(encoding="utf-8")
+            return (
+                f"File exceeds the {MAX_FILE_BYTES} byte read limit. "
+                "Use search to find the relevant lines first."
+            )
+
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return "File is not UTF-8 text (it looks binary)."
+
+        lines = content.splitlines()
+        start = max(1, offset or 1)
+        count = limit if limit and limit > 0 else MAX_READ_LINES
+        count = min(count, MAX_READ_LINES)
+        window = lines[start - 1 : start - 1 + count]
+
+        if not window:
+            return f"No lines to read; the file has {len(lines)} lines."
+
+        width = len(str(start + len(window) - 1))
+        body = "\n".join(
+            f"{number:>{width}}  {text}"
+            for number, text in enumerate(window, start=start)
+        )
+
+        remaining = len(lines) - (start - 1 + len(window))
+        if remaining > 0:
+            body += (
+                f"\n\n… {remaining} more lines. Read on with "
+                f'offset={start + len(window)}.'
+            )
+        return body
 
     def write_file(self, user_path: str, content: str) -> str:
         path = self.resolve(user_path)

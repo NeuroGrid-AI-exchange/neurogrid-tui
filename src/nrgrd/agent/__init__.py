@@ -1,4 +1,5 @@
 from nrgrd.agent.events import (
+    AgentCancelled,
     AgentError,
     AgentEvent,
     AgentFinished,
@@ -13,6 +14,7 @@ from nrgrd.agent.permissions import PermissionManager
 
 __all__ = [
     "Agent",
+    "AgentCancelled",
     "AgentError",
     "AgentEvent",
     "AgentFinished",

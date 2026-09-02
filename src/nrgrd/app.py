@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import time
@@ -25,6 +26,7 @@ except ImportError:  # Keep the CLI usable until optional UI dependencies are in
 
 from nrgrd.agent import (
     Agent,
+    AgentCancelled,
     AgentError,
     AgentFinished,
     AssistantChunk,
@@ -71,13 +73,13 @@ from nrgrd.theme.colors import (
 from nrgrd.tools import build_default_registry, register_mcp_tools
 from nrgrd.widgets.logo import create_logo, logo_frames
 from nrgrd.theme.colors import BACKGROUND
-from nrgrd.workspace import WorkspaceTools
+from nrgrd.workspace import WorkspaceTools, discover
 
 
 DIM = MUTED
 
-# Seconds between startup logo frames; the whole animation is ~0.3s.
-LOGO_FRAME_SECONDS = 0.07
+# Seconds between startup logo frames; the whole animation is ~1.4s.
+LOGO_FRAME_SECONDS = 0.08
 
 
 class NrgrdApp:
@@ -91,12 +93,15 @@ class NrgrdApp:
         self.session_manager = SessionManager(
             self.working_directory
         )
+        self.workspace = discover(self.working_directory)
         self.workspace_tools = WorkspaceTools(self.working_directory)
         self.mcp_client = MCPClient(self.working_directory)
         self.mcp_client.reload()
 
         self.tool_registry = build_default_registry(self.workspace_tools)
         register_mcp_tools(self.tool_registry, self.mcp_client)
+        # Set by CLI mode; approves permission-gated tools without asking.
+        self.approve_all = False
         self.permissions = PermissionManager(callback=self.ask_permission)
 
         self.credentials = load_credential_store()
@@ -278,6 +283,28 @@ class NrgrdApp:
             )
         )
 
+    def run_once(self, prompt: str, approve_all: bool = False) -> int:
+        """Answer one prompt without the TUI, then exit.
+
+        Shares the whole runtime with interactive mode — same agent, tools,
+        permissions and session — so scripts and CI behave like the TUI.
+        Returns a process exit code.
+        """
+        self.approve_all = approve_all
+
+        if self.provider is None:
+            self.print_missing_api_key()
+            return 1
+
+        if not self.config.model.strip():
+            self.console.print(
+                f"[{ERROR}]● No model configured. Use --model or /config edit.[/]"
+            )
+            return 1
+
+        self.send_message(prompt)
+        return 0
+
     def run(self) -> None:
         """
         Run the main interactive loop.
@@ -335,7 +362,9 @@ class NrgrdApp:
             return Prompt.ask(f"[bold {GREEN_VIVID}]nrgrd[/bold {GREEN_VIVID}][bold {PINK}]>[/bold {PINK}]").strip()
         commands = [
             "/help", "/con", "/models", "/config", "/config edit", "/session",
-            "/session clear", "/compact", "/tools", "/mcp", "/mcp edit",
+            "/session clear", "/session list", "/session new", "/session resume",
+            "/session rename", "/session delete", "/compact", "/tools", "/mcp", "/mcp edit",
+            "/permissions", "/permissions reset", "/diff", "/context",
             "/mcp reload", "/system", "/system edit", "/clear", "/exit",
         ]
         session = PromptSession(completer=WordCompleter(commands, sentence=True))
@@ -426,6 +455,40 @@ class NrgrdApp:
         if normalized == "/session":
             self.show_session_information()
             return False
+
+        if normalized == "/permissions":
+            self.show_permissions()
+            return False
+
+        if normalized == "/permissions reset":
+            self.permissions.revoke_session_grants()
+            self.console.print(
+                f"[{GREEN_VIVID}]● Session approvals revoked; "
+                f"gated tools will ask again.[/]"
+            )
+            return False
+
+        if normalized == "/diff":
+            self.show_diff()
+            return False
+
+        if normalized == "/context":
+            self.show_context()
+            return False
+
+        if normalized in {"/session list", "/sessions"}:
+            self.show_sessions()
+            return False
+
+        for verb, action in (
+            ("/session new ", self.new_session),
+            ("/session resume ", self.resume_session),
+            ("/session rename ", self.rename_session),
+            ("/session delete ", self.delete_session),
+        ):
+            if normalized.startswith(verb):
+                action(command[len(verb):].strip().strip("\"'"))
+                return False
 
         if normalized in {
             "/session clear",
@@ -538,6 +601,12 @@ class NrgrdApp:
             ),
         )
 
+        table.add_row("/session list", "List saved sessions for this workspace.")
+        table.add_row("/session new <name>", "Start and switch to a new session.")
+        table.add_row("/session resume <name>", "Resume a saved session.")
+        table.add_row("/session rename <name>", "Rename the current session.")
+        table.add_row("/session delete <name>", "Delete a saved session.")
+
         table.add_row(
             "/compact [focus]",
             "Summarize older conversation and keep a recent context tail.",
@@ -548,6 +617,10 @@ class NrgrdApp:
             "Show the workspace coding tools available to Nrgrd.",
         )
 
+        table.add_row("/permissions", "Show how each tool is gated.")
+        table.add_row("/permissions reset", "Revoke this session's approvals.")
+        table.add_row("/diff", "Show the working tree diff.")
+        table.add_row("/context", "Show context window usage.")
         table.add_row("/mcp", "Show configured MCP servers and discovered tools.")
         table.add_row("/mcp edit", "Show where to edit the Claude-compatible mcpServers file.")
         table.add_row("/mcp reload", "Reconnect to configured MCP servers and refresh tools.")
@@ -797,6 +870,165 @@ class NrgrdApp:
         save_config(self.config)
         self.console.print(
             f"[{GREEN_VIVID}]● Selected model: [bold]{model}[/bold][/]"
+        )
+
+    def show_permissions(self) -> None:
+        """Show how each tool is gated, and what was approved this session."""
+        table = Table(
+            title=f"[bold {PINK_LIGHT}]Permissions[/bold {PINK_LIGHT}]",
+            box=ROUNDED,
+            border_style=BORDER,
+            header_style=f"bold {PINK}",
+            padding=(0, 1),
+        )
+        table.add_column("Tool", style=PINK_LIGHT, no_wrap=True)
+        table.add_column("Policy", style=TEXT, no_wrap=True)
+        table.add_column("This session", style=MUTED)
+
+        grants = set(self.permissions.session_grants)
+        for name in self.tool_registry.names():
+            tool = self.tool_registry.get(name)
+            if tool is None:
+                continue
+            table.add_row(
+                tool.name,
+                tool.permission.value,
+                "always allowed" if tool.name in grants else "",
+            )
+        self.console.print(table)
+        self.console.print(
+            f"[{MUTED}]allow = runs freely · ask = prompts first. "
+            f"/permissions reset clears this session's approvals.[/]"
+        )
+
+    def show_diff(self) -> None:
+        """Show what has changed in the working tree."""
+        diff = self.tool_registry.execute("git_diff", "{}")
+        self.console.print(
+            Panel(
+                diff,
+                title=f"[bold {GREEN_BRIGHT}]Working tree diff[/bold {GREEN_BRIGHT}]",
+                border_style=BORDER,
+                box=ROUNDED,
+                padding=(0, 1),
+            )
+        )
+
+    def show_context(self) -> None:
+        """Show how much of the context window the session is using."""
+        messages = self.session_manager.get_messages()
+        used = estimate_messages_tokens(messages)
+        window = self.config.context_window_tokens
+        percent = (used / window * 100) if window else 0.0
+        reserve = max(1024, window // 8)
+
+        content = (
+            f"[bold {GREEN}]Session:[/bold {GREEN}] {self.session_manager.name}\n"
+            f"[bold {GREEN}]Messages:[/bold {GREEN}] {len(messages)}\n"
+            f"[bold {GREEN}]Estimated tokens:[/bold {GREEN}] "
+            f"{used:,} / {window:,} ({percent:.0f}%)\n"
+            f"[bold {GREEN}]Auto-compacts above:[/bold {GREEN}] "
+            f"{window - reserve:,} tokens"
+        )
+        self.console.print(
+            Panel(
+                content,
+                title=f"[bold {PINK_LIGHT}]Context[/bold {PINK_LIGHT}]",
+                border_style=BORDER,
+                box=ROUNDED,
+                padding=(0, 1),
+            )
+        )
+        self.console.print(
+            f"[{MUTED}]Estimates, not billing: token counts are approximated "
+            f"locally, not reported by the endpoint. /compact to summarise now.[/]"
+        )
+
+    def show_sessions(self) -> None:
+        """List every saved session for this workspace."""
+        sessions = self.session_manager.list_sessions()
+        table = Table(
+            title=f"[bold {PINK_LIGHT}]Sessions[/bold {PINK_LIGHT}]",
+            box=ROUNDED,
+            border_style=BORDER,
+            header_style=f"bold {PINK}",
+            padding=(0, 1),
+        )
+        table.add_column("", style=GREEN_VIVID, no_wrap=True)
+        table.add_column("Session", style=TEXT)
+        table.add_column("Messages", justify="right", style=MUTED)
+        table.add_column("Updated", style=MUTED)
+
+        if not sessions:
+            table.add_row("", "No saved sessions yet", "", "")
+        for session in sessions:
+            active = session.name == self.session_manager.name
+            table.add_row(
+                "●" if active else "",
+                session.name,
+                str(session.messages),
+                session.updated_at or "—",
+            )
+        self.console.print(table)
+        self.console.print(
+            f"[{MUTED}]/session new <name>, /session resume <name>, "
+            f"/session rename <name>, /session delete <name>[/]"
+        )
+
+    def new_session(self, name: str) -> None:
+        if not name:
+            self.console.print(f"[{ERROR}]● Give the session a name.[/]")
+            return
+        self.session_manager.start(name)
+        self.console.print(
+            f"[{GREEN_VIVID}]● Started session[/] [bold {TEXT}]{name}[/]"
+        )
+        self.print_header()
+
+    def resume_session(self, name: str) -> None:
+        if not name:
+            self.console.print(f"[{ERROR}]● Name the session to resume.[/]")
+            return
+        known = {session.name for session in self.session_manager.list_sessions()}
+        if name not in known:
+            self.console.print(
+                f"[{ERROR}]● No session called[/] [bold]{name}[/]. "
+                f"[{MUTED}]Use /session list to see them.[/]"
+            )
+            return
+        self.session_manager.switch(name)
+        self.console.print(
+            f"[{GREEN_VIVID}]● Resumed[/] [bold {TEXT}]{name}[/] "
+            f"[{MUTED}]({len(self.session_manager.get_messages())} messages)[/]"
+        )
+        self.print_header()
+
+    def rename_session(self, name: str) -> None:
+        if not name:
+            self.console.print(f"[{ERROR}]● Give the session a new name.[/]")
+            return
+        previous = self.session_manager.name
+        if not self.session_manager.rename(name):
+            self.console.print(
+                f"[{ERROR}]● A session called[/] [bold]{name}[/] "
+                f"[{ERROR}]already exists.[/]"
+            )
+            return
+        self.console.print(
+            f"[{GREEN_VIVID}]● Renamed[/] [{MUTED}]{previous}[/] → "
+            f"[bold {TEXT}]{name}[/]"
+        )
+
+    def delete_session(self, name: str) -> None:
+        if not name:
+            self.console.print(f"[{ERROR}]● Name the session to delete.[/]")
+            return
+        if not self.session_manager.delete(name):
+            self.console.print(f"[{ERROR}]● No session called[/] [bold]{name}[/]")
+            return
+        self.console.print(
+            f"[{GREEN_VIVID}]● Deleted[/] [{MUTED}]{name}[/]. "
+            f"[{MUTED}]Now on {self.session_manager.name}.[/]"
         )
 
     def show_session_information(
@@ -1071,6 +1303,9 @@ class NrgrdApp:
         Returns ``"yes"``, ``"no"``, or ``"always"`` for the rest of the
         session, per :class:`~nrgrd.agent.permissions.PermissionManager`.
         """
+        if self.approve_all:
+            return "always"
+
         try:
             payload = json.loads(arguments or "{}")
         except json.JSONDecodeError:
@@ -1092,6 +1327,13 @@ class NrgrdApp:
                 padding=(0, 1),
             )
         )
+
+        if not self.console.is_terminal:
+            self.console.print(
+                f"[{MUTED}]No terminal to ask on; denying. "
+                f"Re-run with --yes to approve automatically.[/]"
+            )
+            return "no"
 
         try:
             choice = Prompt.ask(
@@ -1175,6 +1417,13 @@ class NrgrdApp:
                             padding=(0, 1),
                         )
                     )
+                elif isinstance(event, AgentCancelled):
+                    close_live()
+                    self.console.print(
+                        f"[{WARNING}]● Interrupted.[/] "
+                        f"[{MUTED}]Any partial reply above was kept.[/]"
+                    )
+                    return event.text
                 elif isinstance(event, AgentFinished):
                     close_live()
                     return event.text
@@ -1237,8 +1486,7 @@ class NrgrdApp:
                 "content": (
                     system_prompt
                     + "\n\n"
-                    "Current working directory:\n"
-                    f"{self.working_directory}"
+                    + self.workspace.summary()
                     + "\n\nYou are a coding assistant. Search and read files before "
                     "editing them. Keep changes scoped to the user's request, report "
                     "what you changed, and never claim a file or command action "
@@ -1290,6 +1538,37 @@ class NrgrdApp:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="nrgrd",
+        description=(
+            "Terminal AI coding agent for OpenAI-compatible inference "
+            "endpoints, including NeuroGrid deployments."
+        ),
+    )
+    parser.add_argument(
+        "prompt",
+        nargs="*",
+        help="Run a single prompt and exit instead of opening the TUI.",
+    )
+    parser.add_argument(
+        "--model",
+        default="",
+        help="Use this model for the run instead of the configured one.",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Approve permission-gated tools automatically (for scripts and CI).",
+    )
+    arguments = parser.parse_args()
+
     application = NrgrdApp()
+    if arguments.model:
+        application.config.model = arguments.model
+
+    if arguments.prompt:
+        raise SystemExit(
+            application.run_once(" ".join(arguments.prompt), approve_all=arguments.yes)
+        )
 
     application.run()

@@ -1,5 +1,7 @@
 import hashlib
 import json
+import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +15,26 @@ APP_AUTHOR = "neurogrid"
 
 MAX_MESSAGES = 100
 MAX_SESSION_BYTES = 5 * 1024 * 1024
+
+# The unnamed session a workspace starts with.
+DEFAULT_SESSION = "default"
+
+
+def slugify(name: str) -> str:
+    """Reduce a session name to something safe to put in a filename."""
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip()).strip("-").lower()
+    return slug[:48] or DEFAULT_SESSION
+
+
+@dataclass(frozen=True)
+class SessionInfo:
+    """One saved session, as shown by ``/session list``."""
+
+    name: str
+    path: Path
+    messages: int
+    updated_at: str
+    size_bytes: int
 
 
 class WorkspaceSessionStore:
@@ -28,10 +50,13 @@ class WorkspaceSessionStore:
     def __init__(
         self,
         workspace_path: Path,
+        name: str = DEFAULT_SESSION,
     ) -> None:
         self.workspace_path = (
             workspace_path.resolve()
         )
+
+        self.name = name.strip() or DEFAULT_SESSION
 
         self.sessions_directory = Path(
             user_data_dir(
@@ -49,14 +74,18 @@ class WorkspaceSessionStore:
             self.create_workspace_id()
         )
 
-        self.session_path = (
-            self.sessions_directory
-            / f"{self.workspace_id}.json"
-        )
+        self.session_path = self.path_for(self.name)
 
         self.history_path = (
             self.sessions_directory
-            / f"{self.workspace_id}.history.jsonl"
+            / f"{self.workspace_id}--{slugify(self.name)}.history.jsonl"
+        )
+
+    def path_for(self, name: str) -> Path:
+        """Return the file backing a named session in this workspace."""
+        return (
+            self.sessions_directory
+            / f"{self.workspace_id}--{slugify(name)}.json"
         )
 
     def create_workspace_id(
@@ -156,6 +185,8 @@ class WorkspaceSessionStore:
             "workspace_path": str(
                 self.workspace_path
             ),
+            "name": self.name,
+            "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "messages": [
                 message.model_dump()
                 for message
@@ -261,4 +292,72 @@ class WorkspaceSessionStore:
             self.session_path
             .stat()
             .st_size
+        )
+
+    def list_sessions(self) -> list[SessionInfo]:
+        """Return every saved session for this workspace, newest first."""
+        sessions: list[SessionInfo] = []
+        for path in self.sessions_directory.glob(f"{self.workspace_id}--*.json"):
+            if path.name.endswith(".history.jsonl"):
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue  # A damaged session must not hide the healthy ones.
+            sessions.append(
+                SessionInfo(
+                    name=data.get("name") or DEFAULT_SESSION,
+                    path=path,
+                    messages=len(data.get("messages", [])),
+                    updated_at=data.get("updated_at", ""),
+                    size_bytes=path.stat().st_size,
+                )
+            )
+        return sorted(sessions, key=lambda item: item.updated_at, reverse=True)
+
+    def rename(self, new_name: str) -> bool:
+        """Rename the current session. False if the target already exists."""
+        target = self.path_for(new_name)
+        if target == self.session_path:
+            return True
+        if target.exists():
+            return False
+
+        if self.session_path.exists():
+            messages = self.load_messages()
+            self.session_path.unlink()
+            self.name = new_name.strip() or DEFAULT_SESSION
+            self.session_path = target
+            self.save_messages(messages)
+        else:
+            self.name = new_name.strip() or DEFAULT_SESSION
+            self.session_path = target
+            self.ensure_exists()
+        return True
+
+    def delete(self, name: str) -> bool:
+        """Delete a saved session by name. False if it does not exist."""
+        path = self.path_for(name)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    def ensure_exists(self) -> None:
+        """Write the session file if it is not on disk yet.
+
+        Without this a freshly created session stays invisible to
+        ``list_sessions`` until its first message, so naming a session and
+        then listing it would show nothing.
+        """
+        if not self.session_path.exists():
+            self.save_messages(self.load_messages())
+
+    def switch(self, name: str) -> None:
+        """Point this store at another named session in the same workspace."""
+        self.name = name.strip() or DEFAULT_SESSION
+        self.session_path = self.path_for(self.name)
+        self.history_path = (
+            self.sessions_directory
+            / f"{self.workspace_id}--{slugify(self.name)}.history.jsonl"
         )

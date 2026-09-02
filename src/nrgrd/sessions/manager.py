@@ -2,6 +2,8 @@ from pathlib import Path
 
 from nrgrd.context.models import ChatMessage
 from nrgrd.sessions.store import (
+    DEFAULT_SESSION,
+    SessionInfo,
     WorkspaceSessionStore,
 )
 
@@ -16,6 +18,7 @@ class SessionManager:
     def __init__(
         self,
         workspace_path: Path,
+        name: str = DEFAULT_SESSION,
     ) -> None:
         self.workspace_path = (
             workspace_path.resolve()
@@ -23,9 +26,37 @@ class SessionManager:
 
         self.store = (
             WorkspaceSessionStore(
-                self.workspace_path
+                self.workspace_path,
+                name,
             )
         )
+
+    @property
+    def name(self) -> str:
+        """The session currently in use."""
+        return self.store.name
+
+    def list_sessions(self) -> list[SessionInfo]:
+        return self.store.list_sessions()
+
+    def switch(self, name: str) -> None:
+        """Resume another session in this workspace."""
+        self.store.switch(name)
+
+    def start(self, name: str) -> None:
+        """Switch to a session and persist it, so it exists even when empty."""
+        self.store.switch(name)
+        self.store.ensure_exists()
+
+    def rename(self, new_name: str) -> bool:
+        return self.store.rename(new_name)
+
+    def delete(self, name: str) -> bool:
+        """Delete a session; switches back to the default if it was active."""
+        deleted = self.store.delete(name)
+        if deleted and name.strip() == self.store.name:
+            self.store.switch(DEFAULT_SESSION)
+        return deleted
 
     @property
     def messages(
