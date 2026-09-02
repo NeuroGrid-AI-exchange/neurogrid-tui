@@ -1,4 +1,4 @@
-from mantui.system.prompt import (
+from nrgrd.system.prompt import (
     DEFAULT_SYSTEM_PROMPT,
     get_system_prompt_path,
     load_system_prompt,

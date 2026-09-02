@@ -1,4 +1,4 @@
-"""Minimal stdio MCP server exposing Mantui's workspace file tools."""
+"""Minimal stdio MCP server exposing Nrgrd's workspace file tools."""
 
 import argparse
 import json
@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from mantui.workspace.tools import MCP_TOOLS, WorkspaceTools
+from nrgrd.workspace.tools import MCP_TOOLS, WorkspaceTools
 
 
 def response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -34,7 +34,7 @@ def handle(request: dict[str, Any], tools: WorkspaceTools) -> dict[str, Any] | N
                     "protocolVersion", "2025-03-26"
                 ),
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "mantui-workspace", "version": "0.1.0"},
+                "serverInfo": {"name": "nrgrd-workspace", "version": "0.1.0"},
             },
         )
     if method == "tools/list":

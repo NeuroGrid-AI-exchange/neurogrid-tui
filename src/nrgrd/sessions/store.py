@@ -5,11 +5,11 @@ from pathlib import Path
 
 from platformdirs import user_data_dir
 
-from mantui.context.models import ChatMessage
+from nrgrd.context.models import ChatMessage
 
 
-APP_NAME = "mantui"
-APP_AUTHOR = "mantui"
+APP_NAME = "nrgrd"
+APP_AUTHOR = "neurogrid"
 
 MAX_MESSAGES = 100
 MAX_SESSION_BYTES = 5 * 1024 * 1024
@@ -19,7 +19,7 @@ class WorkspaceSessionStore:
     """
     Stores one conversation session for each workspace.
 
-    The workspace is the directory where Mantui was started.
+    The workspace is the directory where Nrgrd was started.
 
     Sessions are stored outside the project directory in the
     operating system's application data directory.
@@ -132,7 +132,7 @@ class WorkspaceSessionStore:
             ValueError,
         ):
             """
-            Do not prevent Mantui from starting if a
+            Do not prevent Nrgrd from starting if a
             session file is damaged.
             """
 

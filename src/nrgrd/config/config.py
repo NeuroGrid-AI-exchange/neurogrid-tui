@@ -4,13 +4,13 @@ from platformdirs import user_config_dir
 from pydantic import BaseModel, Field
 
 
-APP_NAME = "mantui"
-APP_AUTHOR = "mantui"
+APP_NAME = "nrgrd"
+APP_AUTHOR = "neurogrid"
 
 
 class Config(BaseModel):
     """
-    Mantui's persistent configuration.
+    Nrgrd's persistent configuration.
     """
 
     api_key: str = Field(
@@ -43,7 +43,7 @@ class Config(BaseModel):
 
 def get_config_directory() -> Path:
     """
-    Return Mantui's configuration directory.
+    Return Nrgrd's configuration directory.
 
     On Windows, this will normally be inside AppData.
     """
@@ -65,7 +65,7 @@ def get_config_directory() -> Path:
 
 def get_config_path() -> Path:
     """
-    Return the complete path to Mantui's config.json file.
+    Return the complete path to Nrgrd's config.json file.
     """
 
     return (

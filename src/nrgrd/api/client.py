@@ -4,7 +4,7 @@ from typing import Any
 from openai import OpenAI
 
 
-class MantUIClient:
+class NrgrdClient:
     """OpenAI-compatible API client."""
 
     def __init__(

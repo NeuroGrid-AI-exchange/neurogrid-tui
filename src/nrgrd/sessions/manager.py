@@ -1,14 +1,14 @@
 from pathlib import Path
 
-from mantui.context.models import ChatMessage
-from mantui.sessions.store import (
+from nrgrd.context.models import ChatMessage
+from nrgrd.sessions.store import (
     WorkspaceSessionStore,
 )
 
 
 class SessionManager:
     """
-    High-level session API used by Mantui.
+    High-level session API used by Nrgrd.
 
     Each working directory gets one persistent session.
     """

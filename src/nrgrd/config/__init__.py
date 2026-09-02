@@ -1,4 +1,4 @@
-from mantui.config.config import (
+from nrgrd.config.config import (
     Config,
     get_config_directory,
     get_config_path,

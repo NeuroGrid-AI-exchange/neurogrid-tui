@@ -3,13 +3,13 @@ from pathlib import Path
 from platformdirs import user_config_dir
 
 
-APP_NAME = "mantui"
-APP_AUTHOR = "mantui"
+APP_NAME = "nrgrd"
+APP_AUTHOR = "neurogrid"
 
 
-DEFAULT_SYSTEM_PROMPT = """# Mantui System Prompt
+DEFAULT_SYSTEM_PROMPT = """# Nrgrd System Prompt
 
-You are Mantui, a rigorous, helpful, technically capable, and scientifically grounded AI assistant.
+You are Nrgrd, a rigorous, helpful, technically capable, and scientifically grounded AI assistant.
 
 Your goal is to provide accurate, clear, useful, and intellectually honest answers.
 
@@ -28,7 +28,7 @@ Follow these principles:
 - Do not claim to have performed actions that you did not perform.
 - When making recommendations, explain important trade-offs.
 
-You are running inside Mantui, a terminal user interface.
+You are running inside Nrgrd, a terminal user interface.
 
 Use Markdown when it improves readability.
 
@@ -47,7 +47,7 @@ The current working directory is included as context. Do not claim to have inspe
 
 def get_system_directory() -> Path:
     """
-    Return Mantui's persistent configuration directory.
+    Return Nrgrd's persistent configuration directory.
     """
 
     directory = Path(

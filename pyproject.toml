@@ -1,7 +1,7 @@
 [project]
-name = "mantui"
+name = "nrgrd"
 version = "0.1.0"
-description = "Terminal UI (TUI) for chatting with OpenAI models, managing sessions, and running MCP servers from your terminal"
+description = "NeuroGrid TUI: terminal client for chatting with OpenAI-compatible inference endpoints, managing sessions, and running MCP servers from your terminal"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-mantui = "mantui.app:main"
-mantui-mcp = "mantui.workspace.mcp_server:main"
+nrgrd = "nrgrd.app:main"
+nrgrd-mcp = "nrgrd.workspace.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]

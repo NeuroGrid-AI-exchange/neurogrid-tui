@@ -1,7 +1,7 @@
-from mantui.sessions.manager import (
+from nrgrd.sessions.manager import (
     SessionManager,
 )
-from mantui.sessions.store import (
+from nrgrd.sessions.store import (
     WorkspaceSessionStore,
 )
 

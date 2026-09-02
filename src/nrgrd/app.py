@@ -1,6 +1,4 @@
 import os
-import random
-import shutil
 from pathlib import Path
 from typing import Any
 
@@ -24,24 +22,24 @@ except ImportError:  # Keep the CLI usable until optional UI dependencies are in
     PromptSession = None
     WordCompleter = None
 
-from mantui.config import (
+from nrgrd.config import (
     Config,
     get_config_path,
     load_config,
     save_config,
 )
-from mantui.context.models import ChatMessage
-from mantui.context.tokens import (
+from nrgrd.context.models import ChatMessage
+from nrgrd.context.tokens import (
     estimate_messages_tokens,
     estimate_text_tokens,
 )
-from mantui.mcp import MCPClient, get_mcp_config_path
-from mantui.sessions import SessionManager
-from mantui.system import (
+from nrgrd.mcp import MCPClient, get_mcp_config_path
+from nrgrd.sessions import SessionManager
+from nrgrd.system import (
     load_system_prompt,
     save_system_prompt,
 )
-from mantui.theme.colors import (
+from nrgrd.theme.colors import (
     BORDER,
     ERROR,
     GREEN,
@@ -52,19 +50,15 @@ from mantui.theme.colors import (
     PINK_LIGHT,
     TEXT,
 )
-from mantui.widgets.logo import create_logo
-from mantui.theme.colors import BACKGROUND
-from mantui.widgets.random_mantis import (
-    MANTIS_ART,
-    MANTIS_FACTS,
-)
-from mantui.workspace import FILE_TOOLS, WorkspaceTools
+from nrgrd.widgets.logo import create_logo
+from nrgrd.theme.colors import BACKGROUND
+from nrgrd.workspace import FILE_TOOLS, WorkspaceTools
 
 
 DIM = MUTED
 
 
-class MantuiApp:
+class NrgrdApp:
     def __init__(self) -> None:
         self.console = Console()
 
@@ -121,7 +115,7 @@ class MantuiApp:
 
     def print_logo(self) -> None:
         """
-        Print the Mantui logo and current directory.
+        Print the Nrgrd logo and current directory.
         """
 
         self.print_header()
@@ -135,7 +129,7 @@ class MantuiApp:
         self.console.print(
             Panel(
                 Group(create_logo(), Text(""), Align.center(details)),
-                title=f"[bold {GREEN_BRIGHT}]MANTUI[/bold {GREEN_BRIGHT}]",
+                title=f"[bold {GREEN_BRIGHT}]NRGRD[/bold {GREEN_BRIGHT}]",
                 subtitle=f"[{MUTED}]interactive AI workspace[/]",
                 border_style=BORDER,
                 box=ROUNDED,
@@ -151,7 +145,7 @@ class MantuiApp:
         header = Text()
 
         header.append(
-            "MANTUI",
+            "NRGRD",
             style=f"bold {GREEN_VIVID}",
         )
 
@@ -192,7 +186,7 @@ class MantuiApp:
         self.console.print(
             Panel(
                 header,
-                title=f"[bold {GREEN_BRIGHT}]MANTUI[/bold {GREEN_BRIGHT}]",
+                title=f"[bold {GREEN_BRIGHT}]NRGRD[/bold {GREEN_BRIGHT}]",
                 border_style=BORDER,
                 box=ROUNDED,
                 padding=(0, 1),
@@ -240,13 +234,13 @@ class MantuiApp:
 
     def ask_for_input(self) -> str:
         """Read input with a slash-command dropdown when prompt-toolkit is present."""
-        prompt = "mantui> "
+        prompt = "nrgrd> "
         if PromptSession is None or WordCompleter is None:
-            return Prompt.ask(f"[bold {GREEN_VIVID}]mantui[/bold {GREEN_VIVID}][bold {PINK}]>[/bold {PINK}]").strip()
+            return Prompt.ask(f"[bold {GREEN_VIVID}]nrgrd[/bold {GREEN_VIVID}][bold {PINK}]>[/bold {PINK}]").strip()
         commands = [
             "/help", "/con", "/models", "/config", "/config edit", "/session",
             "/session clear", "/compact", "/tools", "/mcp", "/mcp edit",
-            "/mcp reload", "/system", "/system edit", "/random", "/clear", "/exit",
+            "/mcp reload", "/system", "/system edit", "/clear", "/exit",
         ]
         session = PromptSession(completer=WordCompleter(commands, sentence=True))
         return session.prompt(prompt, complete_while_typing=True).strip()
@@ -256,7 +250,7 @@ class MantuiApp:
         user_input: str,
     ) -> bool:
         """
-        Handle Mantui commands or send a normal message.
+        Handle Nrgrd commands or send a normal message.
         """
 
         command = user_input.strip()
@@ -343,10 +337,6 @@ class MantuiApp:
             self.clear_session()
             return False
 
-        if normalized == "/random":
-            self.show_random_mantis()
-            return False
-
         if normalized == "/system":
             self.show_system_prompt()
             return False
@@ -371,13 +361,13 @@ class MantuiApp:
 
     def show_help(self) -> None:
         """
-        Show Mantui's commands.
+        Show Nrgrd's commands.
         """
 
         table = Table(
             title=(
                 f"[bold {PINK_LIGHT}]"
-                "Mantui Commands"
+                "Nrgrd Commands"
                 f"[/bold {PINK_LIGHT}]"
             ),
             box=ROUNDED,
@@ -458,7 +448,7 @@ class MantuiApp:
 
         table.add_row(
             "/tools",
-            "Show the workspace coding tools available to Mantui.",
+            "Show the workspace coding tools available to Nrgrd.",
         )
 
         table.add_row("/mcp", "Show configured MCP servers and discovered tools.")
@@ -481,14 +471,6 @@ class MantuiApp:
         )
 
         table.add_row(
-            "/random",
-            (
-                "Show the Mantui mascot and "
-                "a random mantis fact."
-            ),
-        )
-
-        table.add_row(
             "/clear",
             (
                 "Clear the terminal."
@@ -505,7 +487,7 @@ class MantuiApp:
         table.add_row(
             "/exit",
             (
-                "Exit Mantui."
+                "Exit Nrgrd."
             ),
         )
 
@@ -524,14 +506,14 @@ class MantuiApp:
             collapse_padding=True,
         )
         table.add_column("Tool", style=PINK_LIGHT, no_wrap=True)
-        table.add_column("What Mantui can do", style=TEXT)
+        table.add_column("What Nrgrd can do", style=TEXT)
         table.add_row("list_files", "Inspect project files and directories")
         table.add_row("read_file", "Read UTF-8 text files")
         table.add_row("write_file", "Create or replace text files")
         table.add_row("edit_file", "Make one precise text replacement")
         self.console.print(table)
         self.console.print(
-            f"[{MUTED}]Tools are limited to the current workspace; no shell, network, or delete access. MCP server: [bold {PINK_LIGHT}]mantui-mcp --root .[/bold {PINK_LIGHT}].[/]"
+            f"[{MUTED}]Tools are limited to the current workspace; no shell, network, or delete access. MCP server: [bold {PINK_LIGHT}]nrgrd-mcp --root .[/bold {PINK_LIGHT}].[/]"
         )
 
     def show_mcp(self) -> None:
@@ -555,7 +537,7 @@ class MantuiApp:
         path = get_mcp_config_path()
         self.console.print(Panel(
             "Add trusted servers using Claude's mcpServers format, then run /mcp reload. "
-            "Use ${workspace} or ${workspaceFolder} for Mantui's current project.\n\n"
+            "Use ${workspace} or ${workspaceFolder} for Nrgrd's current project.\n\n"
             '{\n  "mcpServers": {\n    "filesystem": {\n      "command": "cmd",\n      "args": ["/c", "npx", "-y", "@modelcontextprotocol/server-filesystem", "${workspace}"]\n    }\n  }\n}',
             title=f"[bold {PINK_LIGHT}]Edit {path}[/bold {PINK_LIGHT}]", border_style=BORDER, box=ROUNDED,
         ))
@@ -622,7 +604,7 @@ class MantuiApp:
                 content,
                 title=(
                     f"[bold {PINK_LIGHT}]"
-                    "Mantui Configuration"
+                    "Nrgrd Configuration"
                     f"[/bold {PINK_LIGHT}]"
                 ),
                 border_style=BORDER,
@@ -811,7 +793,7 @@ class MantuiApp:
                 content,
                 title=(
                     f"[bold {PINK_LIGHT}]"
-                    "Mantui Session"
+                    "Nrgrd Session"
                     f"[/bold {PINK_LIGHT}]"
                 ),
                 border_style=BORDER,
@@ -833,81 +815,6 @@ class MantuiApp:
             "was cleared."
             f"[/]"
         )
-
-    def show_random_mantis(
-        self,
-    ) -> None:
-        """
-        Show the mascot and a random mantis fact.
-        """
-
-        title, fact = random.choice(
-            MANTIS_FACTS
-        )
-
-        art = Text(
-            MANTIS_ART,
-            style=f"bold {GREEN}",
-        )
-
-        terminal_width = (
-            shutil.get_terminal_size(
-                fallback=(120, 40)
-            )
-            .columns
-        )
-
-        fact_panel = Panel(
-            (
-                f"[bold {PINK}]"
-                f"{title}"
-                f"[/]\n\n"
-                f"{fact}"
-            ),
-            title=(
-                f"[bold {GREEN}]"
-                "Mantis fact"
-                f"[/bold {GREEN}]"
-            ),
-            border_style=BORDER,
-            box=ROUNDED,
-            width=42,
-            padding=(0, 1),
-        )
-
-        self.console.print()
-
-        if terminal_width >= 120:
-            layout = Table.grid(
-                padding=(0, 1),
-                collapse_padding=True,
-            )
-
-            layout.add_column(
-                justify="left"
-            )
-
-            layout.add_column(
-                justify="left"
-            )
-
-            layout.add_row(
-                art,
-                fact_panel,
-            )
-
-            self.console.print(layout)
-
-        else:
-            self.console.print(art)
-
-            self.console.print()
-
-            self.console.print(
-                fact_panel
-            )
-
-        self.console.print()
 
     def show_system_prompt(
         self,
@@ -1109,8 +1016,8 @@ class MantuiApp:
             response_text = ""
             tool_calls: dict[int, dict[str, str]] = {}
             panel = Panel(
-                Group(Spinner("dots12", text="Mantui is thinking…", style=PINK_LIGHT)),
-                title=f"[bold {GREEN_VIVID}]Mantui[/bold {GREEN_VIVID}]",
+                Group(Spinner("dots12", text="Nrgrd is thinking…", style=PINK_LIGHT)),
+                title=f"[bold {GREEN_VIVID}]Nrgrd[/bold {GREEN_VIVID}]",
                 border_style=GREEN_VIVID,
                 box=ROUNDED,
                 padding=(0, 1),
@@ -1132,7 +1039,7 @@ class MantuiApp:
                         live.update(
                             Panel(
                                 Markdown(response_text),
-                                title=f"[bold {GREEN_VIVID}]Mantui[/bold {GREEN_VIVID}]",
+                                title=f"[bold {GREEN_VIVID}]Nrgrd[/bold {GREEN_VIVID}]",
                                 border_style=GREEN_VIVID,
                                 box=ROUNDED,
                                 padding=(0, 1),
@@ -1295,6 +1202,6 @@ class MantuiApp:
 
 
 def main() -> None:
-    application = MantuiApp()
+    application = NrgrdApp()
 
     application.run()

@@ -1,80 +1,84 @@
-# mantui
+# nrgrd
 
 ![Python](https://img.shields.io/badge/python-3.14%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
 
-**mantui** es una Terminal User Interface (TUI) para interactuar con modelos de IA desde tu terminal. Construida sobre `textual`, `rich` y `asciimatics`, ofrece una experiencia visual envolvente para chatear con la API de OpenAI, gestionar sesiones y ejecutar herramientas MCP.
+**nrgrd** is [NeuroGrid](https://neurogrid.cc)'s Terminal User Interface (TUI)
+for interacting with AI models from your terminal, Claude Code style. Built
+on `textual`, `rich`, and `asciimatics`, it points at any OpenAI-compatible
+inference endpoint — including a NeuroGrid Marketplace deployment (the URL +
+API key of the host you rented) — to chat, manage sessions, and run MCP
+tools.
 
-## Caracteristicas
+## Features
 
-- **Interfaz TUI inmersiva** — Navegacion por teclado con `textual` y widgets personalizados.
-- **Sesiones persistentes** — Guarda el contexto y el historial de conversaciones localmente.
-- **Modelos OpenAI** — Soporte para cualquier modelo compatible con la API de OpenAI.
-- **MCP integrado** — Ejecuta y conecta servidores MCP desde la propia terminal.
-- **Widgets ricos** — Animaciones, logos ASCII y componentes visuales con `rich` y `asciimatics`.
-- **CLI + TUI** — Usa `mantui` para la interfaz grafica o `mantui-mcp` para el servidor MCP.
+- **Immersive TUI** — Keyboard navigation with `textual` and custom widgets.
+- **Persistent sessions** — Saves conversation context and history locally.
+- **OpenAI-compatible endpoint** — Points at any OpenAI-compatible API, including a NeuroGrid deployment.
+- **Built-in MCP** — Run and connect MCP servers straight from the terminal.
+- **CLI + TUI** — Use `nrgrd` for the interactive interface or `nrgrd-mcp` for the MCP server.
 
-## Requisitos
+## Requirements
 
 - Python >= 3.14
-- `uv` (gestor de paquetes recomendado)
+- `uv` (recommended package manager)
 
-## Instalacion
+## Installation
 
 ```bash
-# Clonar el repositorio
-git clone https://github.com/<tu-usuario>/mantui.git
-cd mantui
+# Clone the repository
+git clone https://github.com/<your-user>/nrgrd.git
+cd nrgrd
 
-# Instalar dependencias
+# Install dependencies
 uv sync
 
-# Ejecutar la TUI
-uv run mantui
+# Run the TUI
+uv run nrgrd
 
-# Ejecutar el servidor MCP
-uv run mantui-mcp
+# Run the MCP server
+uv run nrgrd-mcp
 ```
 
-## Configuracion
+## Configuration
 
-Crea un archivo `.env` en la raiz del proyecto con tu clave de OpenAI:
+`nrgrd` doesn't read environment variables for the connection: use
+`/config edit` inside the TUI to save the endpoint URL, the model, and the
+API key (for example, the URL and API key of a NeuroGrid Marketplace
+inference deployment). Configuration is persisted to `config.json` in the
+application's config directory.
 
-```env
-OPENAI_API_KEY=sk-...
+## Project structure
+
+```
+nrgrd/
+├── src/nrgrd/
+│   ├── app.py            # Main entry point
+│   ├── api/               # HTTP client for the OpenAI-compatible API
+│   ├── config/            # Configuration and tokens
+│   ├── context/           # Application state and models
+│   ├── screens/           # TUI screens
+│   ├── sessions/          # Session handling and storage
+│   ├── system/            # System prompts
+│   ├── theme/             # Color palette and styles
+│   ├── widgets/           # Custom visual components
+│   └── workspace/         # Tools, identity, and MCP
+├── docs/                  # Reports and documentation
+└── pyproject.toml         # Dependencies and project metadata
 ```
 
-## Estructura del proyecto
-
-```
-mantui/
-├── src/mantui/
-│   ├── app.py            # Punto de entrada principal
-│   ├── api/              # Cliente HTTP para la API de OpenAI
-│   ├── config/           # Configuracion y tokens
-│   ├── context/          # Estado de la aplicacion y modelos
-│   ├── screens/          # Pantallas de la TUI
-│   ├── sessions/         # Manejo de sesiones y almacenamiento
-│   ├── system/           # Prompts del sistema
-│   ├── theme/            # Paleta de colores y estilos
-│   ├── widgets/          # Componentes visuales personalizados
-│   └── workspace/        # Herramientas, identidad y MCP
-├── docs/                 # Reportes y documentacion
-└── pyproject.toml        # Dependencias y metadatos del proyecto
-```
-
-## Desarrollo
+## Development
 
 ```bash
-# Instalar en modo editable
+# Install in editable mode
 uv sync --dev
 
-# Ejecutar linters / checks (si aplica)
+# Run linters / checks (if applicable)
 uv run ruff check src/
 uv run mypy src/
 ```
 
-## Licencia
+## License
 
 MIT

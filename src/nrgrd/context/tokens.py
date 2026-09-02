@@ -1,6 +1,6 @@
 import math
 
-from mantui.context.models import ChatMessage
+from nrgrd.context.models import ChatMessage
 
 
 def estimate_text_tokens(
