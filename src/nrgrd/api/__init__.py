@@ -1,5 +1,15 @@
-from .client import NrgrdClient
+from nrgrd.api.openai_compatible import OpenAICompatibleProvider
+from nrgrd.api.provider import (
+    ChatDelta,
+    ModelProvider,
+    ProviderError,
+    ToolCallDelta,
+)
 
 __all__ = [
-    "NrgrdClient",
+    "ChatDelta",
+    "ModelProvider",
+    "OpenAICompatibleProvider",
+    "ProviderError",
+    "ToolCallDelta",
 ]

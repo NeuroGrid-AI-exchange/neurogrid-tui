@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "asciimatics>=1.15.0",
+    "keyring>=25.0.0",
     "openai>=2.50.0",
     "platformdirs>=4.11.0",
     "pydantic>=2.13.4",

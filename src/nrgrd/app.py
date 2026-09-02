@@ -1,9 +1,9 @@
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
 from rich.box import ROUNDED
 from rich.align import Align
 from rich.console import Console
@@ -33,11 +33,16 @@ from nrgrd.agent import (
     ToolCallOutput,
     ToolCallStarted,
 )
+from nrgrd.api import ModelProvider, OpenAICompatibleProvider, ProviderError
 from nrgrd.config import (
     Config,
     get_config_path,
     load_config,
     save_config,
+)
+from nrgrd.config.credentials import (
+    load_credential_store,
+    migrate_plaintext_api_key,
 )
 from nrgrd.context.models import ChatMessage
 from nrgrd.context.tokens import (
@@ -45,6 +50,7 @@ from nrgrd.context.tokens import (
     estimate_text_tokens,
 )
 from nrgrd.mcp import MCPClient, get_mcp_config_path
+from nrgrd.screens import run_connect_screen
 from nrgrd.sessions import SessionManager
 from nrgrd.system import (
     load_system_prompt,
@@ -63,12 +69,15 @@ from nrgrd.theme.colors import (
     WARNING,
 )
 from nrgrd.tools import build_default_registry, register_mcp_tools
-from nrgrd.widgets.logo import create_logo
+from nrgrd.widgets.logo import create_logo, logo_frames
 from nrgrd.theme.colors import BACKGROUND
 from nrgrd.workspace import WorkspaceTools
 
 
 DIM = MUTED
+
+# Seconds between startup logo frames; the whole animation is ~0.3s.
+LOGO_FRAME_SECONDS = 0.07
 
 
 class NrgrdApp:
@@ -90,22 +99,65 @@ class NrgrdApp:
         register_mcp_tools(self.tool_registry, self.mcp_client)
         self.permissions = PermissionManager(callback=self.ask_permission)
 
-        self.client: OpenAI | None = None
+        self.credentials = load_credential_store()
+        self.migrated_api_key = migrate_plaintext_api_key(
+            self.config, self.credentials
+        )
+        self.api_key = self.credentials.get()
 
-        self.create_client()
+        self.provider: ModelProvider | None = None
 
-    def create_client(self) -> None:
+        self.create_provider()
+
+    def create_provider(self) -> None:
         """
-        Create the OpenAI-compatible client using the active config.
+        Build the model provider for the configured endpoint.
+
+        nrgrd only ever knows an endpoint, a key, and a model name; which
+        service is behind them is not its business.
         """
 
-        if not self.config.api_key.strip():
-            self.client = None
+        if not self.api_key.strip() or not self.config.base_url.strip():
+            self.provider = None
             return
 
-        self.client = OpenAI(
-            api_key=self.config.api_key.strip(),
-            base_url=self.config.base_url.strip(),
+        self.provider = OpenAICompatibleProvider(
+            endpoint=self.config.base_url.strip(),
+            api_key=self.api_key.strip(),
+        )
+
+    def connect(self) -> None:
+        """Run the connect screen and rebuild the provider from its result."""
+
+        api_key = run_connect_screen(
+            self.console,
+            self.config,
+            self.credentials,
+            current_api_key=self.api_key,
+        )
+        if api_key is None:
+            return
+
+        self.api_key = api_key
+        self.create_provider()
+
+    def print_error_panel(self, summary: str, detail: str, hint: str) -> None:
+        """Render a failure the user can actually act on."""
+
+        body = summary
+        if detail:
+            body += f"\n\n[{MUTED}]{detail}[/]"
+        if hint:
+            body += f"\n\n{hint}"
+
+        self.console.print(
+            Panel(
+                body,
+                title=f"[bold {ERROR}]Model request failed[/bold {ERROR}]",
+                border_style=ERROR,
+                box=ROUNDED,
+                padding=(0, 1),
+            )
         )
 
     def _hex_to_rgb(self, hex_color: str) -> tuple[int, int, int]:
@@ -143,16 +195,32 @@ class NrgrdApp:
         details.add_row("Workspace", str(self.working_directory))
         details.add_row("Model", self.config.model or "Not selected")
         details.add_row("Tip", "Type /help to see available commands")
-        self.console.print(
-            Panel(
-                Group(create_logo(), Text(""), Align.center(details)),
+
+        def panel_for(logo: Text) -> Panel:
+            return Panel(
+                Group(logo, Text(""), Align.center(details)),
                 title=f"[bold {GREEN_BRIGHT}]NRGRD[/bold {GREEN_BRIGHT}]",
                 subtitle=f"[{MUTED}]interactive AI workspace[/]",
                 border_style=BORDER,
                 box=ROUNDED,
                 padding=(1, 2),
             )
-        )
+
+        # Play the emblem's "node fires" animation once at startup, and only
+        # on a real terminal so piped or redirected output stays clean.
+        if not self.console.is_terminal:
+            self.console.print(panel_for(create_logo()))
+            return
+
+        frames = logo_frames()
+        with Live(
+            panel_for(frames[0]),
+            console=self.console,
+            refresh_per_second=30,
+        ) as live:
+            for frame in frames[1:]:
+                time.sleep(LOGO_FRAME_SECONDS)
+                live.update(panel_for(frame))
 
     def print_header(self) -> None:
         """
@@ -219,6 +287,17 @@ class NrgrdApp:
         self._set_terminal_background()
 
         self.print_logo()
+
+        if self.migrated_api_key:
+            self.console.print(
+                f"[{GREEN_VIVID}]● Your API key moved out of config.json "
+                f"and into your {self.credentials.name}.[/]"
+            )
+
+        # First launch: nothing is configured yet, so ask rather than
+        # leaving the user to discover /config edit on their own.
+        if self.provider is None:
+            self.connect()
 
         while True:
             try:
@@ -570,7 +649,7 @@ class NrgrdApp:
         """
         Verify that the configured API is reachable.
         """
-        if self.client is None:
+        if self.provider is None:
             self.print_missing_api_key()
             return
 
@@ -586,11 +665,9 @@ class NrgrdApp:
                 console=self.console,
                 refresh_per_second=20,
             ):
-                self.client.models.list()
-        except Exception as error:
-            self.console.print(
-                f"[{ERROR}]● Connection failed: {error}[/]"
-            )
+                self.provider.list_models()
+        except ProviderError as error:
+            self.print_error_panel(error.summary, error.detail, error.hint)
             return
 
         self.console.print(
@@ -605,8 +682,8 @@ class NrgrdApp:
         config_path = get_config_path()
 
         api_key_status = (
-            "Configured"
-            if self.config.api_key.strip()
+            f"Configured (in your {self.credentials.name})"
+            if self.api_key.strip()
             else "Not configured"
         )
 
@@ -637,57 +714,17 @@ class NrgrdApp:
 
     def edit_config(self) -> None:
         """
-        Edit configuration directly in the terminal.
+        Reconnect: endpoint, API key, and model, in one guided screen.
         """
-        self.console.print(
-            Panel(
-                f"[{MUTED}]Press Enter to keep the current value. "
-                "Leave the API key blank to keep it unchanged.[/]",
-                title=f"[bold {GREEN_VIVID}]Edit Configuration[/bold {GREEN_VIVID}]",
-                border_style=BORDER,
-                box=ROUNDED,
-                padding=(0, 1),
-            )
-        )
 
-        try:
-            api_key = Prompt.ask(
-                f"[bold {PINK}]API key[/bold {PINK}]",
-                password=True,
-                default="",
-                console=self.console,
-            ).strip()
-            base_url = Prompt.ask(
-                f"[bold {PINK}]Endpoint[/bold {PINK}]",
-                default=self.config.base_url,
-                console=self.console,
-            ).strip()
-            model = Prompt.ask(
-                f"[bold {PINK}]Model[/bold {PINK}]",
-                default=self.config.model,
-                console=self.console,
-            ).strip()
-        except (KeyboardInterrupt, EOFError):
-            self.console.print(f"[{MUTED}]Configuration unchanged.[/]")
-            return
-
-        if api_key:
-            self.config.api_key = api_key
-        self.config.base_url = base_url
-        self.config.model = model
-        save_config(self.config)
-        self.create_client()
-
-        self.console.print(
-            f"[{GREEN_VIVID}]● Configuration saved[/]"
-        )
+        self.connect()
 
     def list_models(self) -> None:
         """
         Load and display the models returned by the API.
         """
 
-        if self.client is None:
+        if self.provider is None:
             self.print_missing_api_key()
             return
 
@@ -697,7 +734,7 @@ class NrgrdApp:
             style=GREEN_VIVID,
         )
 
-        error_message: str | None = None
+        failure: ProviderError | None = None
 
         with Live(
             spinner,
@@ -705,22 +742,15 @@ class NrgrdApp:
             refresh_per_second=20,
         ):
             try:
-                response = self.client.models.list()
-                models = sorted(item.id for item in response.data)
-            except Exception as error:
+                models = self.provider.list_models()
+            except ProviderError as error:
                 models = []
-                error_message = str(error)
+                failure = error
 
         if not models:
-            if error_message:
-                self.console.print(
-                    Panel(
-                        error_message,
-                        title=f"[bold {ERROR}]Could not load models[/bold {ERROR}]",
-                        border_style=ERROR,
-                        box=ROUNDED,
-                        padding=(0, 1),
-                    )
+            if failure is not None:
+                self.print_error_panel(
+                    failure.summary, failure.detail, failure.hint
                 )
             else:
                 self.console.print(f"[{PINK}]No models were returned.[/]")
@@ -915,19 +945,26 @@ class NrgrdApp:
         Display an API key error.
         """
 
+        missing = (
+            "an endpoint and an API key"
+            if not self.api_key.strip() and not self.config.base_url.strip()
+            else "an API key"
+            if not self.api_key.strip()
+            else "an endpoint"
+        )
+
         self.console.print(
             Panel(
                 (
-                    "No API key is configured.\n\n"
-                    "Use [bold]/config edit[/bold] "
-                    "to open the configuration file."
+                    f"nrgrd needs {missing} before it can reach a model.\n\n"
+                    "A NeuroGrid deployment gives you an endpoint URL, an "
+                    "API key, and a model name.\n\n"
+                    "Run [bold]/config edit[/bold] to connect."
                 ),
-                title=(
-                    "[bold red]"
-                    "API Key Required"
-                    "[/bold red]"
-                ),
+                title=f"[bold {ERROR}]Not connected[/bold {ERROR}]",
                 border_style=ERROR,
+                box=ROUNDED,
+                padding=(0, 1),
             )
         )
 
@@ -937,7 +974,7 @@ class NrgrdApp:
         automatic: bool = False,
     ) -> bool:
         """Summarize older turns and retain a recent context tail."""
-        if self.client is None or not self.config.model.strip():
+        if self.provider is None or not self.config.model.strip():
             if not automatic:
                 self.print_missing_api_key()
             return False
@@ -990,7 +1027,7 @@ class NrgrdApp:
         spinner = Spinner("dots12", text="Compacting conversation…", style=PINK_LIGHT)
         try:
             with Live(spinner, console=self.console, refresh_per_second=20):
-                response = self.client.chat.completions.create(
+                summary = self.provider.complete_chat(
                     model=self.config.model,
                     messages=[
                         {
@@ -999,12 +1036,10 @@ class NrgrdApp:
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    stream=False,
                 )
-            summary = response.choices[0].message.content or ""
-        except Exception as error:
+        except ProviderError as error:
             if not automatic:
-                self.console.print(f"[{ERROR}]● Compaction failed: {error}[/]")
+                self.print_error_panel(error.summary, error.detail, error.hint)
             return False
 
         if not summary.strip():
@@ -1074,7 +1109,7 @@ class NrgrdApp:
     def run_coding_agent(self, messages: list[dict[str, Any]]) -> str:
         """Drive the agent runtime, rendering its events as it works."""
         agent = Agent(
-            self.client,
+            self.provider,
             self.config.model,
             self.tool_registry,
             permissions=self.permissions,
@@ -1145,7 +1180,10 @@ class NrgrdApp:
                     return event.text
                 elif isinstance(event, AgentError):
                     close_live()
-                    raise RuntimeError(event.message)
+                    self.print_error_panel(
+                        event.message, event.detail, event.hint
+                    )
+                    return ""
         finally:
             close_live()
 
@@ -1159,7 +1197,7 @@ class NrgrdApp:
         Send a message and stream the response.
         """
 
-        if self.client is None:
+        if self.provider is None:
             self.print_missing_api_key()
             return
 
