@@ -1,4 +1,4 @@
-from mantui.app import main
+from nrgrd.app import main
 
 
 if __name__ == "__main__":

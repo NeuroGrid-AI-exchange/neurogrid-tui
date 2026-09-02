@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mantui.config import get_config_directory
+from nrgrd.config import get_config_directory
 
 
 @dataclass(frozen=True)
@@ -167,7 +167,7 @@ class MCPClient:
         lines: queue.Queue[str | None] = queue.Queue()
         threading.Thread(target=lambda: self._read_lines(process.stdout, lines), daemon=True).start()
         try:
-            self._send(process, 1, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "mantui", "version": "0.1.0"}})
+            self._send(process, 1, "initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "nrgrd", "version": "0.1.0"}})
             self._receive(lines, 1)
             process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
             process.stdin.flush()
@@ -209,7 +209,7 @@ class MCPClient:
                 {
                     "protocolVersion": "2025-03-26",
                     "capabilities": {},
-                    "clientInfo": {"name": "mantui", "version": "0.1.0"},
+                    "clientInfo": {"name": "nrgrd", "version": "0.1.0"},
                 },
                 headers,
                 None,
