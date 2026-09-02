@@ -13,10 +13,13 @@ tools.
 
 ## Features
 
+- **Coding agent** — An iterative tool-use loop (`nrgrd.agent`) that reads, searches, edits, and runs commands in your repository until the task is done.
+- **Native tools** — `list_files`, `read_file`, `write_file`, `edit_file`, `search`, `shell`, `git_status`, `git_diff`.
+- **Permissions** — Read-only tools run automatically; file writes, shell commands, and MCP tools ask for approval first (or "always allow" for the session).
 - **Immersive TUI** — Keyboard navigation with `textual` and custom widgets.
 - **Persistent sessions** — Saves conversation context and history locally.
 - **OpenAI-compatible endpoint** — Points at any OpenAI-compatible API, including a NeuroGrid deployment.
-- **Built-in MCP** — Run and connect MCP servers straight from the terminal.
+- **Built-in MCP** — Run and connect MCP servers straight from the terminal; their tools go through the same permission system.
 - **CLI + TUI** — Use `nrgrd` for the interactive interface or `nrgrd-mcp` for the MCP server.
 
 ## Requirements
@@ -54,25 +57,35 @@ application's config directory.
 ```
 nrgrd/
 ├── src/nrgrd/
-│   ├── app.py            # Main entry point
-│   ├── api/               # HTTP client for the OpenAI-compatible API
-│   ├── config/            # Configuration and tokens
-│   ├── context/           # Application state and models
-│   ├── screens/           # TUI screens
-│   ├── sessions/          # Session handling and storage
-│   ├── system/            # System prompts
-│   ├── theme/             # Color palette and styles
-│   ├── widgets/           # Custom visual components
-│   └── workspace/         # Tools, identity, and MCP
-├── docs/                  # Reports and documentation
-└── pyproject.toml         # Dependencies and project metadata
+│   ├── app.py         # TUI entry point (rendering only)
+│   ├── agent/         # Agent runtime: loop, events, permissions — no TUI dependency
+│   ├── tools/         # Tool registry: filesystem, search, shell, git, MCP adapter
+│   ├── api/           # HTTP client for the OpenAI-compatible API
+│   ├── config/        # Configuration and tokens
+│   ├── context/       # Application state and models
+│   ├── screens/       # TUI screens
+│   ├── sessions/      # Session handling and storage
+│   ├── system/        # System prompts
+│   ├── theme/         # Color palette and styles
+│   ├── widgets/       # Custom visual components
+│   └── workspace/     # Filesystem tools, identity, and the MCP client
+├── docs/              # Reports and documentation
+├── tests/             # Agent/tool/permission tests (no TUI, no live endpoint needed)
+└── pyproject.toml     # Dependencies and project metadata
 ```
+
+The agent runtime never imports Rich or Textual — the TUI drives it by
+iterating `agent.run(messages)` and rendering the events it yields. That
+keeps the agent testable headlessly and reusable from a future CLI mode.
 
 ## Development
 
 ```bash
-# Install in editable mode
+# Install in editable mode, including dev dependencies
 uv sync --dev
+
+# Run the test suite
+uv run pytest tests/
 
 # Run linters / checks (if applicable)
 uv run ruff check src/

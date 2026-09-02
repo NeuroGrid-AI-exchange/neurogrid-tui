@@ -89,3 +89,5 @@ uv.lock
 
 # Project specific
 .manui/
+
+docs/
