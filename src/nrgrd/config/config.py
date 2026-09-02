@@ -25,8 +25,9 @@ class Config(BaseModel):
     base_url: str = Field(
         default="",
         description=(
-            "Endpoint of the OpenAI-compatible API (a NeuroGrid deployment, "
-            "vLLM, Ollama, LM Studio, ...). Usually ends in /v1."
+            "Endpoint of the OpenAI-compatible API: the deploy URL from the "
+            "NeuroGrid console, or a local vLLM/Ollama/LM Studio server. "
+            "Usually ends in /v1."
         ),
     )
 

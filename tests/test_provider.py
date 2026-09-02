@@ -78,18 +78,54 @@ def test_transport_failures_become_actionable_errors(error, expected):
     assert raised.value.hint
 
 
-def test_errors_never_leak_the_api_key():
+def test_a_non_api_endpoint_is_explained_rather_than_dumped():
+    """Pointing at a web page (wrong port, a UI, a proxy page) is common.
+
+    The SDK fails deep inside its parser with an unreadable message, so the
+    provider has to name the actual problem.
+    """
+    parser_failure = AttributeError(
+        "'str' object has no attribute '_set_private_attributes'"
+    )
+    provider = provider_raising(parser_failure)
+
+    with pytest.raises(ProviderError) as raised:
+        provider.list_models()
+
+    assert "not an OpenAI-compatible API response" in raised.value.summary
+    assert "/v1" in raised.value.hint
+    # The internal gibberish must not reach the user.
+    assert "_set_private_attributes" not in raised.value.hint
+
+
+def rendered(error: ProviderError) -> str:
+    return " ".join([error.summary, error.detail, error.hint])
+
+
+def test_a_leaky_server_message_is_redacted_not_echoed():
+    """An upstream message is shown, so it must be scrubbed first."""
+    leaky = sdk_error(
+        APIStatusError,
+        status_code=400,
+        message=f"rejected token {API_KEY} for this route",
+    )
+    provider = provider_raising(leaky)
+
+    with pytest.raises(ProviderError) as raised:
+        provider.list_models()
+
+    assert API_KEY not in rendered(raised.value)
+    assert "***" in raised.value.hint
+
+
+def test_an_unexpected_failure_never_leaks_the_api_key():
     leaky = RuntimeError(f"request failed with Authorization: Bearer {API_KEY}")
     provider = provider_raising(leaky)
 
     with pytest.raises(ProviderError) as raised:
         provider.list_models()
 
-    rendered = " ".join(
-        [raised.value.summary, raised.value.detail, raised.value.hint]
-    )
-    assert API_KEY not in rendered
-    assert "***" in rendered
+    assert API_KEY not in rendered(raised.value)
 
 
 def test_stream_chat_omits_tools_when_there_are_none():

@@ -32,6 +32,15 @@ from nrgrd.theme.colors import (
 
 MAX_LISTED_MODELS = 30
 
+# Shown when no endpoint is configured yet. Deliberately host-agnostic:
+# a deploy is served over a generated tunnel URL, so the host varies per
+# deployment. Only the shape is fixed — whatever the console shows, plus /v1.
+ENDPOINT_EXAMPLE = "https://<neurogrid-deploy>/v1"
+
+# The old built-in default. Treated as "nothing configured" so the example
+# shows instead of a localhost URL the user never chose.
+LEGACY_DEFAULT_ENDPOINT = "http://localhost:8000/v1"
+
 
 def run_connect_screen(
     console: Console,
@@ -46,11 +55,21 @@ def run_connect_screen(
     """
     _print_intro(console, credentials)
 
+    current_endpoint = config.base_url.strip()
+    if current_endpoint == LEGACY_DEFAULT_ENDPOINT:
+        current_endpoint = ""
+
+    endpoint_label = f"[bold {PINK}]Endpoint[/bold {PINK}]"
+    if not current_endpoint:
+        endpoint_label += f" [{MUTED}](e.g. {ENDPOINT_EXAMPLE})[/]"
+
     try:
-        endpoint = Prompt.ask(
-            f"[bold {PINK}]Endpoint[/bold {PINK}]",
-            default=config.base_url or "",
-            console=console,
+        # Only offer a default once there is a real endpoint to keep;
+        # otherwise Enter would accept an address the user never chose.
+        endpoint = (
+            Prompt.ask(endpoint_label, default=current_endpoint, console=console)
+            if current_endpoint
+            else Prompt.ask(endpoint_label, console=console)
         ).strip()
 
         api_key = Prompt.ask(
@@ -100,6 +119,7 @@ def _print_intro(console: Console, credentials: CredentialStore) -> None:
         "NeuroGrid deployments, vLLM, Ollama, LM Studio, and anything else "
         "serving the same API",
     )
+    body.add_row("Endpoint", "the deploy URL from your NeuroGrid console")
     body.add_row("API key", f"stored in your {credentials.name}")
 
     console.print(
@@ -141,12 +161,25 @@ def _discover_models(console: Console, provider: ModelProvider) -> list[str]:
 
 
 def _choose_model(console: Console, models: list[str], current: str) -> str:
+    """Settle on a model, asking only when there is a real choice to make.
+
+    A NeuroGrid deployment serves a single model, so the common path is to
+    take the one the endpoint reported and move on.
+    """
     if not models:
         return Prompt.ask(
             f"[bold {PINK}]Model[/bold {PINK}]",
             default=current,
             console=console,
         ).strip()
+
+    if len(models) == 1:
+        only = models[0]
+        console.print(
+            f"[{GREEN_VIVID}]● Model[/] [bold {TEXT}]{only}[/] "
+            f"[{MUTED}](the only one this endpoint serves)[/]"
+        )
+        return only
 
     listing = Table(
         box=ROUNDED,

@@ -91,3 +91,4 @@ uv.lock
 .manui/
 
 docs/
+dist/

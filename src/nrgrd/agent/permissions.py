@@ -18,6 +18,15 @@ class PermissionManager:
         self.callback = callback
         self._always_allowed: set[str] = set()
 
+    @property
+    def session_grants(self) -> list[str]:
+        """Tools the user chose to always allow for this session."""
+        return sorted(self._always_allowed)
+
+    def revoke_session_grants(self) -> None:
+        """Forget every "always allow", so those tools ask again."""
+        self._always_allowed.clear()
+
     def check(self, name: str, arguments: str, level: PermissionLevel) -> bool:
         if level == PermissionLevel.ALLOW:
             return True

@@ -10,6 +10,7 @@ from typing import Any
 
 from openai import (
     APIConnectionError,
+    APIError,
     APIStatusError,
     APITimeoutError,
     AuthenticationError,
@@ -165,6 +166,18 @@ class OpenAICompatibleProvider(ModelProvider):
                 f"The endpoint returned HTTP {error.status_code}.",
                 detail,
                 self._redact(str(getattr(error, "message", "")).strip()) or change,
+            )
+        if not isinstance(error, APIError):
+            # The request itself went through, but the reply could not be
+            # read as an API response. Almost always the URL points at
+            # something that is not an OpenAI-compatible API — a web UI, a
+            # proxy error page, or simply the wrong port.
+            return ProviderError(
+                "The endpoint replied with something that is not an "
+                "OpenAI-compatible API response.",
+                detail,
+                "Check the URL points at the API itself (it usually ends "
+                f"in /v1) rather than a web page. {change}",
             )
         return ProviderError(
             "The model request failed.",
