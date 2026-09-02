@@ -1,15 +1,9 @@
 import itertools
 
-from rich.console import Console
-
 import nrgrd.screens.connect as connect
 from nrgrd.api.provider import ProviderError
 from nrgrd.config.config import Config
-from tests.helpers import MemoryStore
-
-
-def quiet_console() -> Console:
-    return Console(file=open("/dev/null", "w"), force_terminal=False)
+from tests.helpers import MemoryStore, quiet_console
 
 
 def answer_with(monkeypatch, answers):
