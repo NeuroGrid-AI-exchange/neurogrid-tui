@@ -18,6 +18,11 @@ dependencies = [
 nrgrd = "nrgrd.app:main"
 nrgrd-mcp = "nrgrd.workspace.mcp_server:main"
 
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

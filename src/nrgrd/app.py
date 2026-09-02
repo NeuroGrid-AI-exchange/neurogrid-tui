@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,16 @@ except ImportError:  # Keep the CLI usable until optional UI dependencies are in
     PromptSession = None
     WordCompleter = None
 
+from nrgrd.agent import (
+    Agent,
+    AgentError,
+    AgentFinished,
+    AssistantChunk,
+    PermissionManager,
+    ToolCallDenied,
+    ToolCallOutput,
+    ToolCallStarted,
+)
 from nrgrd.config import (
     Config,
     get_config_path,
@@ -49,10 +60,12 @@ from nrgrd.theme.colors import (
     PINK,
     PINK_LIGHT,
     TEXT,
+    WARNING,
 )
+from nrgrd.tools import build_default_registry, register_mcp_tools
 from nrgrd.widgets.logo import create_logo
 from nrgrd.theme.colors import BACKGROUND
-from nrgrd.workspace import FILE_TOOLS, WorkspaceTools
+from nrgrd.workspace import WorkspaceTools
 
 
 DIM = MUTED
@@ -72,6 +85,10 @@ class NrgrdApp:
         self.workspace_tools = WorkspaceTools(self.working_directory)
         self.mcp_client = MCPClient(self.working_directory)
         self.mcp_client.reload()
+
+        self.tool_registry = build_default_registry(self.workspace_tools)
+        register_mcp_tools(self.tool_registry, self.mcp_client)
+        self.permissions = PermissionManager(callback=self.ask_permission)
 
         self.client: OpenAI | None = None
 
@@ -289,6 +306,7 @@ class NrgrdApp:
 
         if normalized == "/mcp reload":
             self.mcp_client.reload()
+            register_mcp_tools(self.tool_registry, self.mcp_client)
             self.console.print(f"[{GREEN_VIVID}]● MCP servers reloaded[/]")
             self.show_mcp()
             return False
@@ -496,9 +514,9 @@ class NrgrdApp:
         )
 
     def show_tools(self) -> None:
-        """Show the coding tools and their workspace-only scope."""
+        """Show the registered tools, their scope, and their permission level."""
         table = Table(
-            title=f"[bold {PINK_LIGHT}]Workspace Tools[/bold {PINK_LIGHT}]",
+            title=f"[bold {PINK_LIGHT}]Tools[/bold {PINK_LIGHT}]",
             box=ROUNDED,
             border_style=PINK,
             header_style=f"bold {GREEN_VIVID}",
@@ -506,14 +524,18 @@ class NrgrdApp:
             collapse_padding=True,
         )
         table.add_column("Tool", style=PINK_LIGHT, no_wrap=True)
-        table.add_column("What Nrgrd can do", style=TEXT)
-        table.add_row("list_files", "Inspect project files and directories")
-        table.add_row("read_file", "Read UTF-8 text files")
-        table.add_row("write_file", "Create or replace text files")
-        table.add_row("edit_file", "Make one precise text replacement")
+        table.add_column("Description", style=TEXT)
+        table.add_column("Permission", style=MUTED, no_wrap=True)
+        for name in self.tool_registry.names():
+            tool = self.tool_registry.get(name)
+            if tool is None:
+                continue
+            table.add_row(tool.name, tool.description, tool.permission.value)
         self.console.print(table)
         self.console.print(
-            f"[{MUTED}]Tools are limited to the current workspace; no shell, network, or delete access. MCP server: [bold {PINK_LIGHT}]nrgrd-mcp --root .[/bold {PINK_LIGHT}].[/]"
+            f"[{MUTED}]Tools are scoped to the current workspace. "
+            f"[bold]ask[/bold]-level tools prompt for approval before running. "
+            f"MCP server: [bold {PINK_LIGHT}]nrgrd-mcp --root .[/bold {PINK_LIGHT}].[/]"
         )
 
     def show_mcp(self) -> None:
@@ -1008,13 +1030,59 @@ class NrgrdApp:
         threshold = self.config.context_window_tokens - reserve_tokens
         return current_tokens + incoming_tokens >= threshold
 
+    def ask_permission(self, name: str, arguments: str) -> str:
+        """Prompt the user to approve an ``ask``-level tool call.
+
+        Returns ``"yes"``, ``"no"``, or ``"always"`` for the rest of the
+        session, per :class:`~nrgrd.agent.permissions.PermissionManager`.
+        """
+        try:
+            payload = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+
+        if name == "shell":
+            detail = str(payload.get("command", arguments))
+        elif isinstance(payload, dict) and "path" in payload:
+            detail = str(payload["path"])
+        else:
+            detail = arguments
+
+        self.console.print(
+            Panel(
+                detail,
+                title=f"[bold {WARNING}]Nrgrd wants to run: {name}[/bold {WARNING}]",
+                border_style=WARNING,
+                box=ROUNDED,
+                padding=(0, 1),
+            )
+        )
+
+        try:
+            choice = Prompt.ask(
+                f"[bold {PINK}]Allow?[/bold {PINK}] "
+                f"[y] Yes  [n] No  [a] Always allow this tool this session",
+                choices=["y", "n", "a"],
+                default="n",
+                console=self.console,
+            )
+        except (KeyboardInterrupt, EOFError):
+            return "no"
+
+        return {"y": "yes", "n": "no", "a": "always"}[choice]
+
     def run_coding_agent(self, messages: list[dict[str, Any]]) -> str:
-        """Stream tokens while processing a bounded, visible tool loop."""
-        mcp_client = getattr(self, "mcp_client", None)
-        mcp_tools = mcp_client.openai_tools() if mcp_client else []
-        for _ in range(12):
-            response_text = ""
-            tool_calls: dict[int, dict[str, str]] = {}
+        """Drive the agent runtime, rendering its events as it works."""
+        agent = Agent(
+            self.client,
+            self.config.model,
+            self.tool_registry,
+            permissions=self.permissions,
+        )
+
+        live: Live | None = None
+
+        def open_thinking_panel() -> Live:
             panel = Panel(
                 Group(Spinner("dots12", text="Nrgrd is thinking…", style=PINK_LIGHT)),
                 title=f"[bold {GREEN_VIVID}]Nrgrd[/bold {GREEN_VIVID}]",
@@ -1022,89 +1090,66 @@ class NrgrdApp:
                 box=ROUNDED,
                 padding=(0, 1),
             )
-            with Live(panel, console=self.console, refresh_per_second=20) as live:
-                stream = self.client.chat.completions.create(
-                    model=self.config.model,
-                    messages=messages,
-                    tools=[*FILE_TOOLS, *mcp_tools],
-                    tool_choice="auto",
-                    stream=True,
-                )
-                for chunk in stream:
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    if delta.content:
-                        response_text += delta.content
-                        live.update(
-                            Panel(
-                                Markdown(response_text),
-                                title=f"[bold {GREEN_VIVID}]Nrgrd[/bold {GREEN_VIVID}]",
-                                border_style=GREEN_VIVID,
-                                box=ROUNDED,
-                                padding=(0, 1),
-                            )
-                        )
-                    for call in delta.tool_calls or []:
-                        item = tool_calls.setdefault(
-                            call.index,
-                            {"id": "", "name": "", "arguments": ""},
-                        )
-                        if call.id:
-                            item["id"] = call.id
-                        if call.function and call.function.name:
-                            item["name"] += call.function.name
-                        if call.function and call.function.arguments:
-                            item["arguments"] += call.function.arguments
+            instance = Live(panel, console=self.console, refresh_per_second=20)
+            instance.start()
+            return instance
 
-            if not tool_calls:
-                return response_text
+        def close_live() -> None:
+            nonlocal live
+            if live is not None:
+                live.stop()
+                live = None
 
-            calls = list(tool_calls.values())
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": response_text or None,
-                    "tool_calls": [
-                        {
-                            "id": call["id"],
-                            "type": "function",
-                            "function": {
-                                "name": call["name"],
-                                "arguments": call["arguments"],
-                            },
-                        }
-                        for call in calls
-                    ],
-                }
-            )
-            for tool_call in calls:
-                name = tool_call["name"]
-                mcp_client = getattr(self, "mcp_client", None)
-                result = (
-                    mcp_client.execute(name, tool_call["arguments"])
-                    if name.startswith("mcp__") and mcp_client is not None
-                    else self.workspace_tools.execute(name, tool_call["arguments"])
-                )
-                self.console.print(
-                    Panel(
-                        f"[bold {PINK_LIGHT}]{name}[/bold {PINK_LIGHT}]\n"
-                        f"[{MUTED}]{result[:500]}[/]",
-                        title=f"[bold {PINK}]{'MCP Tool' if name.startswith('mcp__') else 'Workspace Tool'}[/bold {PINK}]",
-                        border_style=PINK,
-                        box=ROUNDED,
-                        padding=(0, 1),
+        try:
+            for event in agent.run(messages):
+                if isinstance(event, AssistantChunk):
+                    if live is None:
+                        live = open_thinking_panel()
+                    live.update(
+                        Panel(
+                            Markdown(event.text),
+                            title=f"[bold {GREEN_VIVID}]Nrgrd[/bold {GREEN_VIVID}]",
+                            border_style=GREEN_VIVID,
+                            box=ROUNDED,
+                            padding=(0, 1),
+                        )
                     )
-                )
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": result,
-                    }
-                )
+                elif isinstance(event, ToolCallStarted):
+                    close_live()
+                elif isinstance(event, ToolCallOutput):
+                    is_mcp = event.name.startswith("mcp__")
+                    self.console.print(
+                        Panel(
+                            f"[bold {PINK_LIGHT}]{event.name}[/bold {PINK_LIGHT}]\n"
+                            f"[{MUTED}]{event.result[:500]}[/]",
+                            title=f"[bold {PINK}]{'MCP Tool' if is_mcp else 'Tool'}[/bold {PINK}]",
+                            border_style=PINK,
+                            box=ROUNDED,
+                            padding=(0, 1),
+                        )
+                    )
+                elif isinstance(event, ToolCallDenied):
+                    close_live()
+                    self.console.print(
+                        Panel(
+                            f"[{MUTED}]Denied by user; the agent was told and will "
+                            "adjust its approach.[/]",
+                            title=f"[bold {ERROR}]{event.name} — Permission Denied[/bold {ERROR}]",
+                            border_style=ERROR,
+                            box=ROUNDED,
+                            padding=(0, 1),
+                        )
+                    )
+                elif isinstance(event, AgentFinished):
+                    close_live()
+                    return event.text
+                elif isinstance(event, AgentError):
+                    close_live()
+                    raise RuntimeError(event.message)
+        finally:
+            close_live()
 
-        raise RuntimeError("Tool call limit reached; please continue with a narrower request.")
+        raise RuntimeError("Agent loop ended without a final response.")
 
     def send_message(
         self,
@@ -1156,13 +1201,18 @@ class NrgrdApp:
                     + "\n\n"
                     "Current working directory:\n"
                     f"{self.working_directory}"
-                    + "\n\nYou are a coding assistant. Use the workspace tools to "
-                    "inspect files before editing them. Keep changes scoped to the "
-                    "user's request, report what you changed, and never claim a file "
-                    "action unless a tool completed it. Use only the exact tool names "
-                    "declared in this request; never infer or invent a tool such as "
-                    "delete_file. If the requested operation has no declared tool, "
-                    "state that limitation clearly."
+                    + "\n\nYou are a coding assistant. Search and read files before "
+                    "editing them. Keep changes scoped to the user's request, report "
+                    "what you changed, and never claim a file or command action "
+                    "unless a tool confirmed it. Use git_status/git_diff to check "
+                    "your work and, when practical, run relevant tests or builds "
+                    "with the shell tool to validate a change. Use only the exact "
+                    "tool names declared in this request; never infer or invent a "
+                    "tool such as delete_file. Some tools require the user's "
+                    "explicit approval before they run and may be denied — if one "
+                    "is denied, do not retry it; explain the limitation and adjust "
+                    "your approach. If the requested operation has no declared "
+                    "tool, state that limitation clearly."
                 ),
             }
         ]
