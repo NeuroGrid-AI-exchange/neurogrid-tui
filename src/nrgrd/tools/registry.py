@@ -84,7 +84,15 @@ class ToolRegistry:
         tool = self.get(name)
         if tool is None:
             return f"Unsupported tool: {name}"
-        return self.truncate(tool.execute(arguments))
+        try:
+            result = tool.execute(arguments)
+        except Exception as error:
+            # A tool bug, or an MCP server falling over, is something the
+            # model can work around; letting it escape would end the whole
+            # turn and throw away everything done so far. KeyboardInterrupt
+            # is not an Exception, so cancellation still gets through.
+            return f"Tool '{name}' failed: {type(error).__name__}: {error}"
+        return self.truncate(result)
 
     def truncate(self, result: str) -> str:
         """Cap a tool result, saying so rather than silently cutting."""

@@ -38,6 +38,9 @@ def _execute(root: Path, arguments: str) -> str:
             cwd=root,
             capture_output=True,
             text=True,
+            # Build tools print binary and mixed encodings; replace what
+            # cannot be decoded rather than crash on it.
+            errors="replace",
             timeout=TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:

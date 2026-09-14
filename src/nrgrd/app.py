@@ -31,6 +31,7 @@ from nrgrd.agent import (
     AgentFinished,
     AssistantChunk,
     PermissionManager,
+    PermissionRequested,
     ToolCallDenied,
     ToolCallOutput,
     ToolCallStarted,
@@ -102,6 +103,9 @@ class NrgrdApp:
         register_mcp_tools(self.tool_registry, self.mcp_client)
         # Set by CLI mode; approves permission-gated tools without asking.
         self.approve_all = False
+        # How the last turn ended: "finished", "cancelled" or "error".
+        self.last_outcome = "finished"
+        self._prompt_session: Any = None
         self.permissions = PermissionManager(callback=self.ask_permission)
 
         self.credentials = load_credential_store()
@@ -303,7 +307,8 @@ class NrgrdApp:
             return 1
 
         self.send_message(prompt)
-        return 0
+        # 130 is the conventional status for a run stopped by Ctrl+C.
+        return {"finished": 0, "cancelled": 130}.get(self.last_outcome, 1)
 
     def run(self) -> None:
         """
@@ -367,8 +372,13 @@ class NrgrdApp:
             "/permissions", "/permissions reset", "/diff", "/context",
             "/mcp reload", "/system", "/system edit", "/clear", "/exit",
         ]
-        session = PromptSession(completer=WordCompleter(commands, sentence=True))
-        return session.prompt(prompt, complete_while_typing=True).strip()
+        if self._prompt_session is None:
+            # Created once and reused: a fresh session per prompt would
+            # start with empty history, so up-arrow would recall nothing.
+            self._prompt_session = PromptSession(
+                completer=WordCompleter(commands, sentence=True)
+            )
+        return self._prompt_session.prompt(prompt, complete_while_typing=True).strip()
 
     def handle_input(
         self,
@@ -1310,10 +1320,14 @@ class NrgrdApp:
             payload = json.loads(arguments or "{}")
         except json.JSONDecodeError:
             payload = {}
+        if not isinstance(payload, dict):
+            # The model decides the arguments; a list or bare string here
+            # must fall back to showing them raw, not crash the prompt.
+            payload = {}
 
         if name == "shell":
             detail = str(payload.get("command", arguments))
-        elif isinstance(payload, dict) and "path" in payload:
+        elif "path" in payload:
             detail = str(payload["path"])
         else:
             detail = arguments
@@ -1391,7 +1405,9 @@ class NrgrdApp:
                             padding=(0, 1),
                         )
                     )
-                elif isinstance(event, ToolCallStarted):
+                elif isinstance(event, (PermissionRequested, ToolCallStarted)):
+                    # A running Live display redraws over anything printed
+                    # beneath it, including the permission prompt.
                     close_live()
                 elif isinstance(event, ToolCallOutput):
                     is_mcp = event.name.startswith("mcp__")
@@ -1419,6 +1435,7 @@ class NrgrdApp:
                     )
                 elif isinstance(event, AgentCancelled):
                     close_live()
+                    self.last_outcome = "cancelled"
                     self.console.print(
                         f"[{WARNING}]● Interrupted.[/] "
                         f"[{MUTED}]Any partial reply above was kept.[/]"
@@ -1426,6 +1443,7 @@ class NrgrdApp:
                     return event.text
                 elif isinstance(event, AgentFinished):
                     close_live()
+                    self.last_outcome = "finished"
                     return event.text
                 elif isinstance(event, AgentError):
                     close_live()
@@ -1445,6 +1463,10 @@ class NrgrdApp:
         """
         Send a message and stream the response.
         """
+
+        # Pessimistic until the agent reports otherwise: every early return
+        # below is a failure as far as a script calling nrgrd is concerned.
+        self.last_outcome = "error"
 
         if self.provider is None:
             self.print_missing_api_key()
@@ -1518,6 +1540,7 @@ class NrgrdApp:
         try:
             response_text = self.run_coding_agent(messages)
         except KeyboardInterrupt:
+            self.last_outcome = "cancelled"
             self.console.print(f"[{PINK}]Generation interrupted; nothing was saved.[/]")
             return
         except Exception as error:
