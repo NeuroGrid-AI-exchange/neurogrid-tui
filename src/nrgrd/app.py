@@ -24,6 +24,7 @@ except ImportError:  # Keep the CLI usable until optional UI dependencies are in
     PromptSession = None
     WordCompleter = None
 
+from nrgrd import __version__
 from nrgrd.agent import (
     Agent,
     AgentCancelled,
@@ -1572,6 +1573,11 @@ def main() -> None:
         "prompt",
         nargs="*",
         help="Run a single prompt and exit instead of opening the TUI.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "--model",

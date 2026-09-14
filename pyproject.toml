@@ -1,9 +1,27 @@
 [project]
 name = "nrgrd"
-version = "0.1.0"
-description = "NeuroGrid TUI: terminal client for chatting with OpenAI-compatible inference endpoints, managing sessions, and running MCP servers from your terminal"
+dynamic = ["version"]
+description = "Terminal AI coding agent for OpenAI-compatible inference endpoints, built for NeuroGrid deployments"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "NeuroGrid" }]
+keywords = ["ai", "agent", "cli", "tui", "llm", "coding-assistant", "openai-compatible", "neurogrid"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "keyring>=25.0.0",
     "openai>=2.50.0",
@@ -12,6 +30,11 @@ dependencies = [
     "prompt-toolkit>=3.0.52",
     "rich>=15.0.0",
 ]
+
+[project.urls]
+Homepage = "https://neurogrid.cc"
+Repository = "https://github.com/NeuroGrid-AI-exchange/neurogrid-tui"
+Issues = "https://github.com/NeuroGrid-AI-exchange/neurogrid-tui/issues"
 
 [project.scripts]
 nrgrd = "nrgrd.app:main"
@@ -23,5 +46,15 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+# The version comes from the git tag (v0.1.0 -> 0.1.0), so the tag and the
+# published package can never disagree again.
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0"
+
+[tool.hatch.version.raw-options]
+# PyPI rejects local versions (the "+g1a2b3c" suffix on untagged commits).
+local_scheme = "no-local-version"

@@ -1,25 +1,97 @@
 name: Release
 
+# Pushing a tag like v0.1.0 builds, verifies, and publishes that version to
+# PyPI, then creates the matching GitHub Release.
+#
+# A PyPI upload is permanent: a version number can never be uploaded twice,
+# even after deleting it. So nothing is published until the tests pass, the
+# built version matches the tag, and the wheel is proven to install and run.
+
 on:
   push:
     tags: ["v*"]
-
-permissions:
-  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The version is derived from the git tag, which needs history.
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      - name: Run tests
+        run: uv run --dev pytest tests/ -q
+        env:
+          PYTHON_KEYRING_BACKEND: keyring.backends.fail.Keyring
+
       - name: Build the wheel and sdist
         run: uv build
 
-      - name: Publish to GitHub Releases
+      - name: Check the built version matches the tag
+        run: |
+          uv run --no-project --with packaging python - <<'EOF'
+          import glob, os, sys
+          from packaging.version import Version
+
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          wheel = os.path.basename(glob.glob("dist/*.whl")[0])
+          built = wheel.split("-")[1]
+          if Version(built) != Version(tag):
+              sys.exit(f"Tag {tag} built version {built}; refusing to publish.")
+          print(f"Version {built} matches tag.")
+          EOF
+
+      - name: Validate package metadata
+        run: uvx twine check --strict dist/*
+
+      - name: Smoke-test the wheel in a clean environment
+        run: |
+          uvx --from "$(ls dist/*.whl)" nrgrd --version
+          uvx --from "$(ls dist/*.whl)" nrgrd --help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    # Must match the environment named in the PyPI trusted publisher.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/nrgrd/
+    permissions:
+      # Trusted publishing: PyPI accepts a short-lived OIDC token from this
+      # workflow, so no API token is stored anywhere.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    # After PyPI, so a release page never advertises a version that failed
+    # to publish.
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
