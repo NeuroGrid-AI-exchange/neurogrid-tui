@@ -12,9 +12,15 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        # The oldest supported Python and the newest, on every platform.
+        python: ["3.11", "3.14"]
+    env:
+      UV_PYTHON: ${{ matrix.python }}
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -32,4 +38,21 @@ jobs:
           PYTHON_KEYRING_BACKEND: keyring.backends.fail.Keyring
 
       - name: Check the CLI starts
-        run: uv run nrgrd --help
+        run: uv run nrgrd --version
+
+  package:
+    # Catches packaging breakage on the pull request, not at release time.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build
+        run: uv build
+
+      - name: Validate package metadata
+        run: uvx twine check --strict dist/*

@@ -16,6 +16,7 @@ def _run_git(root: Path, args: list[str]) -> str:
             cwd=root,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired) as error:

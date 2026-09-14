@@ -33,6 +33,14 @@ class ToolCallOutput:
 
 
 @dataclass(frozen=True)
+class PermissionRequested:
+    """The agent is about to ask whether a gated tool may run."""
+
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
 class ToolCallDenied:
     """A tool call the permission system rejected."""
 
@@ -69,6 +77,7 @@ AgentEvent = (
     AgentStarted
     | AgentCancelled
     | AssistantChunk
+    | PermissionRequested
     | ToolCallStarted
     | ToolCallOutput
     | ToolCallDenied

@@ -93,6 +93,7 @@ def _git_branch(path: Path) -> tuple[bool, str]:
             cwd=path,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=_GIT_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):

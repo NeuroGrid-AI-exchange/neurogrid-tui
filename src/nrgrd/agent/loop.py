@@ -7,6 +7,7 @@ renders. That keeps it usable headlessly (CLI, tests, future interfaces)
 and testable with a mocked model provider.
 """
 
+import itertools
 from collections.abc import Iterator
 from typing import Any
 
@@ -17,6 +18,7 @@ from nrgrd.agent.events import (
     AgentFinished,
     AgentStarted,
     AssistantChunk,
+    PermissionRequested,
     ToolCallDenied,
     ToolCallOutput,
     ToolCallStarted,
@@ -42,6 +44,7 @@ class Agent:
         self.tool_registry = tool_registry
         self.permissions = permissions or PermissionManager()
         self.max_iterations = max_iterations
+        self._call_ids = itertools.count(1)
 
     def run(self, messages: list[dict[str, Any]]) -> Iterator[AgentEvent]:
         """Run the tool-use loop, mutating ``messages`` in place."""
@@ -60,16 +63,25 @@ class Agent:
                     if delta.content:
                         response_text += delta.content
                         yield AssistantChunk(delta.content, response_text)
-                    for call in delta.tool_calls:
-                        item = tool_calls.setdefault(
-                            call.index, {"id": "", "name": "", "arguments": ""}
+                    for fragment in delta.tool_calls:
+                        # Some compatible servers omit ``index`` and send
+                        # each call whole in one chunk. Keying those on
+                        # None would glue separate calls into one garbled
+                        # call, so give each its own slot instead.
+                        slot = (
+                            fragment.index
+                            if fragment.index is not None
+                            else len(tool_calls)
                         )
-                        if call.id:
-                            item["id"] = call.id
-                        if call.name:
-                            item["name"] += call.name
-                        if call.arguments:
-                            item["arguments"] += call.arguments
+                        item = tool_calls.setdefault(
+                            slot, {"id": "", "name": "", "arguments": ""}
+                        )
+                        if fragment.id:
+                            item["id"] = fragment.id
+                        if fragment.name:
+                            item["name"] += fragment.name
+                        if fragment.arguments:
+                            item["arguments"] += fragment.arguments
             except KeyboardInterrupt:
                 # Keep the partial reply: it is context the user may still
                 # want, and dropping it mid-turn loses their work.
@@ -87,6 +99,13 @@ class Agent:
                 return
 
             calls = list(tool_calls.values())
+            for call in calls:
+                # Tool results are matched to calls by id, and a blank id
+                # is rejected. Servers that do not send ids get stable,
+                # unique ones.
+                if not call["id"]:
+                    call["id"] = f"call_{next(self._call_ids)}"
+
             messages.append(
                 {
                     "role": "assistant",
@@ -108,6 +127,7 @@ class Agent:
             cancelled = False
             for call in calls:
                 name, arguments = call["name"], call["arguments"]
+                tool = self.tool_registry.get(name)
 
                 if cancelled:
                     # Interrupted earlier in this batch: run nothing further,
@@ -116,9 +136,21 @@ class Agent:
                     # endpoint, so a half-filled batch would poison the
                     # conversation rather than simply end it.
                     result = "Cancelled by the user."
+                elif tool is None:
+                    # Nothing would run, so there is nothing to approve:
+                    # asking "allow delete_file?" for a tool that does not
+                    # exist only confuses the user. Tell the model instead.
+                    yield ToolCallStarted(name, arguments)
+                    result = self.tool_registry.execute(name, arguments)
+                    yield ToolCallOutput(name, result)
                 else:
-                    tool = self.tool_registry.get(name)
-                    level = tool.permission if tool else PermissionLevel.ASK
+                    level = tool.permission
+
+                    if level is PermissionLevel.ASK:
+                        # Yielded before asking, so an interface can stop
+                        # any live rendering first; otherwise a refreshing
+                        # stream panel draws over the prompt.
+                        yield PermissionRequested(name, arguments)
 
                     if not self.permissions.check(name, arguments, level):
                         result = "Permission denied by the user."

@@ -1,6 +1,9 @@
 """Safe, workspace-scoped tools exposed to the coding assistant."""
 
 import json
+import os
+import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +13,83 @@ MAX_FILE_BYTES = 200_000
 # window, which is usually much smaller than the file itself.
 MAX_READ_LINES = 400
 MAX_RESULTS = 200
-IGNORED_DIRECTORIES = {".git", ".venv", "__pycache__", ".mypy_cache"}
+# Never descended into when walking without git. These are dependency,
+# build and cache directories: huge, generated, and not what anyone means
+# by "the project".
+IGNORED_DIRECTORIES = {
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    "node_modules",
+    ".next",
+    ".nuxt",
+    "dist",
+    "build",
+    "target",
+    ".gradle",
+    ".idea",
+    ".vscode",
+    "coverage",
+    ".terraform",
+}
+_GIT_TIMEOUT_SECONDS = 10
+
+
+def _git_listed_files(directory: Path) -> list[Path] | None:
+    """Files git would consider part of the project under ``directory``.
+
+    Tracked plus untracked-but-not-ignored, so ``.gitignore`` is honoured
+    exactly. ``None`` when this is not a git checkout (or git is missing).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=directory,
+            capture_output=True,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    names = result.stdout.decode("utf-8", errors="replace").split("\0")
+    return [directory / name for name in names if name]
+
+
+def iter_workspace_files(root: Path, base: Path) -> Iterator[Path]:
+    """Yield the project's files under ``base``, safely.
+
+    Honours ``.gitignore`` when ``base`` is in a git checkout, otherwise
+    skips :data:`IGNORED_DIRECTORIES` without descending into them. Either
+    way, anything that resolves outside ``root`` is skipped: a symlink such
+    as ``notes.txt -> ~/.aws/credentials`` in a cloned repository must not
+    become a way to read, and send to the model, files outside the
+    workspace.
+    """
+    listed = _git_listed_files(base)
+    if listed is None:
+        listed = []
+        for directory, subdirectories, files in os.walk(base, followlinks=False):
+            subdirectories[:] = sorted(
+                name for name in subdirectories if name not in IGNORED_DIRECTORIES
+            )
+            listed.extend(Path(directory, name) for name in sorted(files))
+
+    for path in sorted(listed):
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved.is_file() and resolved.is_relative_to(root):
+            yield path
 
 
 FILE_TOOLS: list[dict[str, Any]] = [
@@ -18,7 +97,10 @@ FILE_TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List files and directories below a workspace-relative path.",
+            "description": (
+                "List project files below a workspace-relative path. Honours "
+                ".gitignore and skips dependency and build directories."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string", "default": "."}},
@@ -142,15 +224,14 @@ class WorkspaceTools:
         if not directory.is_dir():
             return "Path is not a directory."
         entries: list[str] = []
-        for path in directory.rglob("*"):
-            relative = path.relative_to(self.root)
-            if any(part in IGNORED_DIRECTORIES for part in relative.parts):
-                continue
-            entries.append(f"{'DIR ' if path.is_dir() else 'FILE'} {relative}")
+        for path in iter_workspace_files(self.root, directory):
             if len(entries) >= MAX_RESULTS:
-                entries.append("… results truncated")
+                entries.append(
+                    "… results truncated. List a subdirectory to see more."
+                )
                 break
-        return "\n".join(entries) or "Directory is empty."
+            entries.append(str(path.relative_to(self.root)))
+        return "\n".join(entries) or "No files found."
 
     def read_file(
         self,

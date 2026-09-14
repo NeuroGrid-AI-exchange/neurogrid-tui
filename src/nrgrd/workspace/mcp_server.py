@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from nrgrd import __version__
 from nrgrd.workspace.tools import MCP_TOOLS, WorkspaceTools
 
 
@@ -34,7 +35,7 @@ def handle(request: dict[str, Any], tools: WorkspaceTools) -> dict[str, Any] | N
                     "protocolVersion", "2025-03-26"
                 ),
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "nrgrd-workspace", "version": "0.1.0"},
+                "serverInfo": {"name": "nrgrd-workspace", "version": __version__},
             },
         )
     if method == "tools/list":

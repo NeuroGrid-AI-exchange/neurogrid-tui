@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 from nrgrd.tools.registry import PermissionLevel, Tool
-from nrgrd.workspace.tools import IGNORED_DIRECTORIES
+from nrgrd.workspace.tools import iter_workspace_files
 
 MAX_MATCHES = 200
 _TIMEOUT_SECONDS = 15
@@ -39,6 +39,7 @@ def _search_ripgrep(root: Path, query: str, rel_path: str) -> list[str] | None:
             cwd=root,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -50,14 +51,10 @@ def _search_ripgrep(root: Path, query: str, rel_path: str) -> list[str] | None:
 
 def _search_python(root: Path, query: str, rel_path: str) -> list[str]:
     base = _resolve(root, rel_path)
-    paths = [base] if base.is_file() else sorted(base.rglob("*"))
+    paths = [base] if base.is_file() else iter_workspace_files(root, base)
     matches: list[str] = []
     for path in paths:
-        if not path.is_file():
-            continue
         relative = path.relative_to(root)
-        if any(part in IGNORED_DIRECTORIES for part in relative.parts):
-            continue
         try:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):

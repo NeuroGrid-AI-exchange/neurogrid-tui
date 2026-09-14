@@ -1,6 +1,7 @@
 # nrgrd
 
-![Python](https://img.shields.io/badge/python-3.14%2B-blue)
+[![PyPI](https://img.shields.io/pypi/v/nrgrd)](https://pypi.org/project/nrgrd/)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-alpha-orange)
 
@@ -28,33 +29,28 @@ tools.
 - **Built-in MCP** — Run and connect MCP servers straight from the terminal; their tools go through the same permission system.
 - **CLI + TUI** — Use `nrgrd` for the interactive interface or `nrgrd-mcp` for the MCP server.
 
-## Requirements
-
-- Python >= 3.14
-- `uv` (recommended package manager)
-
 ## Installation
 
-```bash
-# Clone the repository
-git clone https://github.com/<your-user>/nrgrd.git
-cd nrgrd
-
-# Install dependencies
-uv sync
-
-# Run the TUI
-uv run nrgrd
-
-# Run the MCP server
-uv run nrgrd-mcp
-```
-
-Once published, the intended install is a single command:
+nrgrd runs on macOS, Linux and Windows, with Python 3.11 or newer.
 
 ```bash
 uv tool install nrgrd
 nrgrd
+```
+
+`uv tool install` puts `nrgrd` on your PATH in its own environment, and
+downloads a suitable Python if you don't have one. Update with
+`uv tool upgrade nrgrd`. If you prefer pipx: `pipx install nrgrd`.
+
+Don't have uv? See [installing uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+### From source
+
+```bash
+git clone https://github.com/NeuroGrid-AI-exchange/neurogrid-tui.git
+cd neurogrid-tui
+uv sync
+uv run nrgrd
 ```
 
 ## Usage
@@ -128,6 +124,19 @@ The agent runtime never imports Rich or Textual — the TUI drives it by
 iterating `agent.run(messages)` and rendering the events it yields. That
 keeps the agent testable headlessly and reusable from a future CLI mode.
 
+## Releasing
+
+Push a version tag. CI runs the tests, builds, checks the built version
+matches the tag, and publishes to PyPI and GitHub Releases:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The version comes from the tag; there is no version number to edit in
+`pyproject.toml`.
+
 ## Development
 
 ```bash
@@ -144,4 +153,4 @@ uv run mypy src/
 
 ## License
 
-MIT
+[MIT](LICENSE) © NeuroGrid
