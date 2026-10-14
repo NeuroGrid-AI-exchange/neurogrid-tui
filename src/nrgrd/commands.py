@@ -47,6 +47,7 @@ COMMANDS: tuple[Command, ...] = (
     Command("/context", "/context", "Show what the next request sends and how much of the window it uses."),
     Command("/neurochat", "/neurochat", "Open NeuroChat in your browser on this endpoint and API key."),
     Command("/update", "/update", "Check PyPI for a newer nrgrd and upgrade it."),
+    Command("/version", "/version", "Show the nrgrd version, its Python, and how it was installed."),
     Command("/mcp", "/mcp", "Show configured MCP servers and discovered tools."),
     Command("/mcp edit", "/mcp edit", "Show where to edit the Claude-compatible mcpServers file."),
     Command("/mcp reload", "/mcp reload", "Reconnect to configured MCP servers and refresh tools."),

@@ -350,7 +350,8 @@ class NrgrdApp:
             return Panel(
                 Group(logo, Text(""), Align.center(details)),
                 title=f"[bold {GREEN_BRIGHT}]NRGRD[/bold {GREEN_BRIGHT}]",
-                subtitle=f"[{MUTED}]interactive AI workspace[/]",
+                subtitle=f"[{MUTED}]interactive AI workspace · [/][{GREEN_VIVID}]v{__version__}[/]",
+                subtitle_align="right",
                 border_style=BORDER,
                 box=ROUNDED,
                 padding=(1, 2),
@@ -728,6 +729,10 @@ class NrgrdApp:
 
         if normalized == "/update":
             self.run_update()
+            return False
+
+        if normalized == "/version":
+            self.show_version()
             return False
 
         if normalized in {"/session list", "/sessions"}:
@@ -2068,6 +2073,32 @@ class NrgrdApp:
                 f"[{GREEN_VIVID}]● nrgrd {self.update_available} is available[/] "
                 f"[{MUTED}](you have {__version__}). Run /update to upgrade.[/]"
             )
+
+    def show_version(self) -> None:
+        """/version: this nrgrd, the Python under it, and how it was installed."""
+        command = upgrade_command()
+        if command is None:
+            installed = "from source"
+        elif command[0] in {"uv", "pipx"}:
+            installed = f"with {command[0]}"
+        else:
+            installed = "with pip"
+        python = ".".join(str(part) for part in sys.version_info[:3])
+
+        self.console.print(
+            Text.assemble(
+                ("nrgrd ", f"bold {PINK_LIGHT}"),
+                (__version__, f"bold {GREEN_VIVID}"),
+                (f"  ·  Python {python}  ·  installed {installed}", MUTED),
+            )
+        )
+        if self.update_available:
+            self.console.print(
+                f"[{GREEN_VIVID}]● {self.update_available} is available.[/] "
+                f"[{MUTED}]Run /update to upgrade.[/]"
+            )
+        else:
+            self.console.print(f"[{MUTED}]/update checks PyPI for a newer version.[/]")
 
     def run_update(self) -> None:
         """/update: compare with PyPI and offer to upgrade in place."""

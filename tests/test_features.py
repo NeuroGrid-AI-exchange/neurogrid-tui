@@ -63,6 +63,7 @@ def test_every_command_is_handled(app, monkeypatch):
         "show_sessions", "new_session", "resume_session", "rename_session", "delete_session",
         "clear_session", "show_system_prompt", "edit_system_prompt", "clear_terminal", "print_header",
         "run_goal", "show_attachments", "attach_paths", "attach_clipboard_image", "show_graph", "run_update",
+        "show_version",
     ):
         monkeypatch.setattr(app, name, lambda *a, **k: None)
     app.mcp_client.reload = lambda: None
@@ -531,3 +532,33 @@ def test_the_startup_notice_shows_once(app):
 def test_the_check_can_be_turned_off(monkeypatch):
     monkeypatch.setenv(updates.DISABLE_ENV, "1")
     assert updates.update_check_disabled()
+
+
+# --- version --------------------------------------------------------------
+
+
+def test_version_command(app, monkeypatch):
+    monkeypatch.setattr(app_module, "upgrade_command", lambda: ["uv", "tool", "upgrade", "nrgrd"])
+
+    app.handle_input("/version")
+
+    text = output(app)
+    assert f"nrgrd {app_module.__version__}" in text
+    assert "installed with uv" in text
+    assert "Python " in text
+
+
+def test_version_mentions_an_available_update(app, monkeypatch):
+    monkeypatch.setattr(app_module, "upgrade_command", lambda: None)
+    app.update_available = "99.0.0"
+
+    app.handle_input("/version")
+
+    assert "installed from source" in output(app)
+    assert "99.0.0 is available" in output(app)
+
+
+def test_the_logo_screen_shows_the_version(app):
+    app.print_logo()
+
+    assert f"v{app_module.__version__}" in output(app)

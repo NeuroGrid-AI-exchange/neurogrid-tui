@@ -97,6 +97,7 @@ nrgrd --yes "run the tests"        # approve gated tools automatically (CI)
 | `/diff` | Show the working tree diff |
 | `/neurochat` | Open this connection in NeuroChat in your browser |
 | `/update` | Check for and install a newer nrgrd |
+| `/version` | Show the installed version |
 | `/mcp`, `/mcp edit`, `/mcp reload` | Manage MCP servers |
 
 While typing a command, the line under the input describes the one
