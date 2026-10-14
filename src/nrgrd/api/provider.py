@@ -69,6 +69,14 @@ class ModelProvider(ABC):
     ) -> Iterator[ChatDelta]:
         """Stream a reply, yielding normalized deltas as they arrive."""
 
+    def context_window(self, model: str) -> int | None:
+        """Return the model's context window in tokens, if the endpoint says.
+
+        Optional: an endpoint that doesn't publish it returns None, and the
+        caller falls back to the configured value.
+        """
+        return None
+
     @abstractmethod
     def complete_chat(
         self,

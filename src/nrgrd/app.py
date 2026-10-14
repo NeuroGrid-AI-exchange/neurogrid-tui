@@ -1,9 +1,15 @@
 import argparse
+import itertools
 import json
 import os
+import shlex
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from rich.box import ROUNDED
 from rich.align import Align
@@ -15,14 +21,21 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.spinner import Spinner
 from rich.table import Table
+from rich.style import Style
 from rich.text import Text
 
 try:
     from prompt_toolkit import PromptSession
     from prompt_toolkit.completion import WordCompleter
+    from prompt_toolkit.application import get_app, run_in_terminal
+    from prompt_toolkit.formatted_text import ANSI
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.styles import Style as PromptStyle
 except ImportError:  # Keep the CLI usable until optional UI dependencies are installed.
     PromptSession = None
     WordCompleter = None
+    ANSI = None
 
 from nrgrd import __version__
 from nrgrd.agent import (
@@ -38,6 +51,20 @@ from nrgrd.agent import (
     ToolCallStarted,
 )
 from nrgrd.api import ModelProvider, OpenAICompatibleProvider, ProviderError
+from nrgrd.attachments import (
+    Attachment,
+    AttachmentError,
+    ClipboardUnavailable,
+    build_user_content,
+    clipboard_image,
+    clipboard_text,
+    display_name,
+    image_attachment,
+    load_attachment,
+    pasted_paths,
+)
+from nrgrd.browser import open_url
+from nrgrd.commands import COMMANDS, describe
 from nrgrd.config import (
     Config,
     get_config_path,
@@ -50,12 +77,13 @@ from nrgrd.config.credentials import (
 )
 from nrgrd.context.models import ChatMessage
 from nrgrd.context.tokens import (
-    estimate_messages_tokens,
+    estimate_request_tokens,
     estimate_text_tokens,
 )
 from nrgrd.mcp import MCPClient, get_mcp_config_path
 from nrgrd.screens import run_connect_screen
 from nrgrd.sessions import SessionManager
+from nrgrd.sessions.graph import ConversationGraph
 from nrgrd.system import (
     load_system_prompt,
     save_system_prompt,
@@ -73,7 +101,17 @@ from nrgrd.theme.colors import (
     WARNING,
 )
 from nrgrd.tools import build_default_registry, register_mcp_tools
+from nrgrd.updates import (
+    PYPI_PAGE_URL,
+    cached_latest_version,
+    fetch_latest_version,
+    is_newer,
+    update_check_disabled,
+    upgrade_command,
+)
 from nrgrd.widgets.logo import create_logo, logo_frames
+from nrgrd.widgets.graph_view import render_graph
+from nrgrd.widgets.stream import StreamTail
 from nrgrd.theme.colors import BACKGROUND
 from nrgrd.workspace import WorkspaceTools, discover
 
@@ -82,6 +120,101 @@ DIM = MUTED
 
 # Seconds between startup logo frames; the whole animation is ~1.4s.
 LOGO_FRAME_SECONDS = 0.08
+
+# Width of the context bar's meter, in terminal cells. It shrinks on narrow
+# terminals so the bar stays on one line.
+CONTEXT_BAR_CELLS = 24
+CONTEXT_BAR_MIN_CELLS = 6
+
+# Instructions sent after the system prompt and workspace summary on every
+# request.
+CODING_INSTRUCTIONS = (
+    "You are a coding assistant. Search and read files before "
+    "editing them. Keep changes scoped to the user's request, report "
+    "what you changed, and never claim a file or command action "
+    "unless a tool confirmed it. Use git_status/git_diff to check "
+    "your work and, when practical, run relevant tests or builds "
+    "with the shell tool to validate a change. Use only the exact "
+    "tool names declared in this request; never infer or invent a "
+    "tool such as delete_file. Some tools require the user's "
+    "explicit approval before they run and may be denied — if one "
+    "is denied, do not retry it; explain the limitation and adjust "
+    "your approach. If the requested operation has no declared "
+    "tool, state that limitation clearly."
+)
+
+
+# /goal: the lines the agent ends a reply with to say it's done or can't go
+# on alone. There is no round limit; Ctrl+C stops it.
+GOAL_DONE = "GOAL ACHIEVED"
+GOAL_BLOCKED = "GOAL BLOCKED"
+GOAL_START = (
+    "Goal: {goal}\n\n"
+    "Work on this until it is fully achieved. After each reply you'll be asked "
+    "to continue, so keep going step by step rather than stopping to ask, unless "
+    "you truly need the user. Verify the result — run the tests or the build "
+    "when practical. When the goal is achieved and verified, end your reply "
+    f"with a final line that says exactly {GOAL_DONE}. If it can't be achieved "
+    "without the user (missing information, a denied permission, something "
+    f"outside the workspace), end with a final line `{GOAL_BLOCKED}: <reason>`."
+)
+GOAL_CONTINUE = (
+    "Continue working toward the goal: {goal}\n\n"
+    "Pick up where you left off. End with "
+    f"{GOAL_DONE} once it's achieved and verified, or `{GOAL_BLOCKED}: <reason>` "
+    "if you can't go on without the user."
+)
+
+# /graph draws the most recent turns.
+GRAPH_MAX_TURNS = 30
+
+
+def goal_verdict(reply: str) -> tuple[str, str]:
+    """("done" | "blocked" | "continue", reason) from the end of a /goal reply."""
+    for line in reversed(reply.strip().splitlines()):
+        line = line.strip().strip("*`_#>- ").strip()
+        if not line:
+            continue
+        upper = line.upper()
+        if upper.startswith(GOAL_DONE):
+            return "done", ""
+        if upper.startswith(GOAL_BLOCKED):
+            return "blocked", line[len(GOAL_BLOCKED):].lstrip(" :—-").strip()
+        return "continue", ""
+    return "continue", ""
+
+
+# NeuroChat, the browser chat app. /neurochat opens it on this connection.
+NEUROCHAT_URL = "https://chat.neurogrid.cc/"
+
+
+def neurochat_link(base_url: str, api_key: str) -> str:
+    """A NeuroChat link that connects to this endpoint with this key.
+
+    The same format NeuroChat's own share links use (lib/connectionLink.ts):
+    details go in the #fragment, which browsers never send to the server
+    hosting NeuroChat, and NeuroChat strips them from the address bar as
+    soon as it reads them.
+    """
+
+    def encode(value: str) -> str:
+        # Keep ':' and '/' readable, as NeuroChat does; escape the rest
+        # (a '+' or '&' in a key would otherwise break the link).
+        return quote(value.strip(), safe=":/")
+
+    parts = [f"endpoint={encode(base_url)}"]
+    if api_key.strip():
+        parts.append(f"token={encode(api_key)}")
+    return f"{NEUROCHAT_URL}#{'&'.join(parts)}"
+
+
+def format_tokens(count: int) -> str:
+    """12345 -> "12.3k", 131072 -> "131k", 950 -> "950"."""
+    if count >= 100_000:
+        return f"{count / 1000:.0f}k"
+    if count >= 1000:
+        return f"{count / 1000:.1f}k"
+    return str(count)
 
 
 class NrgrdApp:
@@ -107,6 +240,13 @@ class NrgrdApp:
         # How the last turn ended: "finished", "cancelled" or "error".
         self.last_outcome = "finished"
         self._prompt_session: Any = None
+        # Files waiting to go with the next message (/attach, paste, Ctrl+V).
+        self.pending_attachments: list[Attachment] = []
+        # The conversation graph and turn being recorded while a reply runs.
+        self._graph_turn: tuple[ConversationGraph, str] | None = None
+        # Set by the background PyPI check when a newer release exists.
+        self.update_available: str | None = None
+        self._update_notice_shown = False
         self.permissions = PermissionManager(callback=self.ask_permission)
 
         self.credentials = load_credential_store()
@@ -278,6 +418,16 @@ class NrgrdApp:
             style=GREEN_VIVID,
         )
 
+        if self.provider is not None and self.config.model.strip():
+            used = self.context_breakdown()["total"]
+            window, _ = self.context_window()
+            header.append("  •  ", style=DIM)
+            header.append("Context: ", style=f"bold {PINK}")
+            header.append(
+                f"≈{format_tokens(used)} / {format_tokens(window)}",
+                style=GREEN_VIVID,
+            )
+
         self.console.print(
             Panel(
                 header,
@@ -332,7 +482,10 @@ class NrgrdApp:
         if self.provider is None:
             self.connect()
 
+        self.start_update_check()
+
         while True:
+            self.show_update_notice()
             try:
                 user_input = self.ask_for_input()
 
@@ -362,24 +515,81 @@ class NrgrdApp:
                 break
 
     def ask_for_input(self) -> str:
-        """Read input with a slash-command dropdown when prompt-toolkit is present."""
-        prompt = "nrgrd> "
-        if PromptSession is None or WordCompleter is None:
+        """Read input with a slash-command dropdown when prompt-toolkit is present.
+
+        The context bar sits on the line above the input, so how full the
+        context is stays in view while typing the next message.
+        """
+        bar = self.context_bar() if self.provider is not None and self.config.model.strip() else None
+        if PromptSession is None or WordCompleter is None or ANSI is None:
+            if bar is not None:
+                self.console.print(bar)
             return Prompt.ask(f"[bold {GREEN_VIVID}]nrgrd[/bold {GREEN_VIVID}][bold {PINK}]>[/bold {PINK}]").strip()
-        commands = [
-            "/help", "/con", "/models", "/config", "/config edit", "/session",
-            "/session clear", "/session list", "/session new", "/session resume",
-            "/session rename", "/session delete", "/compact", "/tools", "/mcp", "/mcp edit",
-            "/permissions", "/permissions reset", "/diff", "/context",
-            "/mcp reload", "/system", "/system edit", "/clear", "/exit",
-        ]
+        prompt: Any = "nrgrd> "
+        if bar is not None:
+            with self.console.capture() as captured:
+                self.console.print(bar)
+            prompt = ANSI(captured.get() + "nrgrd> ")
         if self._prompt_session is None:
             # Created once and reused: a fresh session per prompt would
             # start with empty history, so up-arrow would recall nothing.
-            self._prompt_session = PromptSession(
-                completer=WordCompleter(commands, sentence=True)
-            )
+            self._prompt_session = self.create_prompt_session()
         return self._prompt_session.prompt(prompt, complete_while_typing=True).strip()
+
+    def create_prompt_session(self) -> Any:
+        """The input line: command menu, description bar, and paste handling."""
+        by_insert = {command.insert: command for command in COMMANDS}
+        completer = WordCompleter(
+            [command.insert for command in COMMANDS],
+            display_dict={command.insert: command.usage for command in COMMANDS},
+            sentence=True,
+        )
+
+        def toolbar() -> list[tuple[str, str]]:
+            # What the highlighted command does, or the one being typed.
+            # With the menu open and nothing highlighted yet, the first
+            # entry: it's the one Tab or ↓ would pick.
+            buffer = get_app().current_buffer
+            state = buffer.complete_state
+            current = None
+            if state:
+                current = state.current_completion or (state.completions[0] if state.completions else None)
+            command = by_insert.get(current.text) if current else describe(buffer.text)
+            parts: list[tuple[str, str]] = []
+            if command:
+                parts += [("class:toolbar.command", f" {command.usage} "), ("", f" {command.description}")]
+            else:
+                parts.append(("class:toolbar.hint", " / for commands · Ctrl+V pastes an image · /attach adds files"))
+            if self.pending_attachments:
+                names = ", ".join(item.name for item in self.pending_attachments)
+                parts.append(("class:toolbar.files", f"   📎 {names}"))
+            return parts
+
+        bindings = KeyBindings()
+
+        @bindings.add("c-v")
+        def _paste(event: Any) -> None:
+            self.paste_into(event.current_buffer)
+
+        @bindings.add(Keys.BracketedPaste)
+        def _paste_or_drop(event: Any) -> None:
+            self.paste_text_into(event.current_buffer, event.data)
+
+        style = PromptStyle.from_dict(
+            {
+                "bottom-toolbar": f"noreverse bg:default {MUTED}",
+                "bottom-toolbar.text": f"noreverse bg:default {MUTED}",
+                "toolbar.command": f"bold {GREEN_VIVID}",
+                "toolbar.hint": MUTED,
+                "toolbar.files": GREEN_VIVID,
+            }
+        )
+        return PromptSession(
+            completer=completer,
+            bottom_toolbar=toolbar,
+            key_bindings=bindings,
+            style=style,
+        )
 
     def handle_input(
         self,
@@ -487,6 +697,39 @@ class NrgrdApp:
             self.show_context()
             return False
 
+        if normalized == "/neurochat":
+            self.open_neurochat()
+            return False
+
+        if normalized == "/goal" or normalized.startswith("/goal "):
+            self.run_goal(command[len("/goal"):])
+            return False
+
+        if normalized == "/attach":
+            self.show_attachments()
+            return False
+
+        if normalized == "/attach clear":
+            self.pending_attachments.clear()
+            self.console.print(f"[{MUTED}]Attachments cleared.[/]")
+            return False
+
+        if normalized.startswith("/attach "):
+            self.attach_paths(command[len("/attach "):])
+            return False
+
+        if normalized == "/paste":
+            self.attach_clipboard_image()
+            return False
+
+        if normalized == "/graph":
+            self.show_graph()
+            return False
+
+        if normalized == "/update":
+            self.run_update()
+            return False
+
         if normalized in {"/session list", "/sessions"}:
             self.show_sessions()
             return False
@@ -559,118 +802,9 @@ class NrgrdApp:
             "Description"
         )
 
-        table.add_row(
-            "/con",
-            (
-                "Check the configured API connection."
-            ),
-        )
-
-        table.add_row(
-            "/models",
-            (
-                "List models available from "
-                "the configured API."
-            ),
-        )
-
-        table.add_row(
-            "/models <model>",
-            (
-                "Select and save a model."
-            ),
-        )
-
-        table.add_row(
-            "/config",
-            (
-                "Show the current configuration."
-            ),
-        )
-
-        table.add_row(
-            "/config edit",
-            (
-                "Open the configuration file "
-                "in the default editor."
-            ),
-        )
-
-        table.add_row(
-            "/session",
-            (
-                "Show the active session, its "
-                "storage location, and usage."
-            ),
-        )
-
-        table.add_row(
-            "/session clear",
-            (
-                "Clear the conversation associated "
-                "with the current directory."
-            ),
-        )
-
-        table.add_row("/session list", "List saved sessions for this workspace.")
-        table.add_row("/session new <name>", "Start and switch to a new session.")
-        table.add_row("/session resume <name>", "Resume a saved session.")
-        table.add_row("/session rename <name>", "Rename the current session.")
-        table.add_row("/session delete <name>", "Delete a saved session.")
-
-        table.add_row(
-            "/compact [focus]",
-            "Summarize older conversation and keep a recent context tail.",
-        )
-
-        table.add_row(
-            "/tools",
-            "Show the workspace coding tools available to Nrgrd.",
-        )
-
-        table.add_row("/permissions", "Show how each tool is gated.")
-        table.add_row("/permissions reset", "Revoke this session's approvals.")
-        table.add_row("/diff", "Show the working tree diff.")
-        table.add_row("/context", "Show context window usage.")
-        table.add_row("/mcp", "Show configured MCP servers and discovered tools.")
-        table.add_row("/mcp edit", "Show where to edit the Claude-compatible mcpServers file.")
-        table.add_row("/mcp reload", "Reconnect to configured MCP servers and refresh tools.")
-
-        table.add_row(
-            "/system",
-            (
-                "Show the current system prompt."
-            ),
-        )
-
-        table.add_row(
-            "/system edit",
-            (
-                "Open the system prompt in the "
-                "default editor."
-            ),
-        )
-
-        table.add_row(
-            "/clear",
-            (
-                "Clear the terminal."
-            ),
-        )
-
-        table.add_row(
-            "/help",
-            (
-                "Show this help."
-            ),
-        )
-
-        table.add_row(
-            "/exit",
-            (
-                "Exit Nrgrd."
-            ),
-        )
+        for entry in COMMANDS:
+            # Text, not markup: "[focus]" in a usage would be read as a style.
+            table.add_row(Text(entry.usage), Text(entry.description))
 
         self.console.print(
             table
@@ -925,34 +1059,135 @@ class NrgrdApp:
             )
         )
 
-    def show_context(self) -> None:
-        """Show how much of the context window the session is using."""
-        messages = self.session_manager.get_messages()
-        used = estimate_messages_tokens(messages)
-        window = self.config.context_window_tokens
-        percent = (used / window * 100) if window else 0.0
-        reserve = max(1024, window // 8)
+    def system_message(self) -> dict[str, Any]:
+        """The system message every request starts with."""
+        return {
+            "role": "system",
+            "content": (
+                load_system_prompt()
+                + "\n\n"
+                + self.workspace.summary()
+                + "\n\n"
+                + CODING_INSTRUCTIONS
+            ),
+        }
 
-        content = (
-            f"[bold {GREEN}]Session:[/bold {GREEN}] {self.session_manager.name}\n"
-            f"[bold {GREEN}]Messages:[/bold {GREEN}] {len(messages)}\n"
-            f"[bold {GREEN}]Estimated tokens:[/bold {GREEN}] "
-            f"{used:,} / {window:,} ({percent:.0f}%)\n"
-            f"[bold {GREEN}]Auto-compacts above:[/bold {GREEN}] "
-            f"{window - reserve:,} tokens"
+    def build_request_messages(self, user_input: str | None = None) -> list[dict[str, Any]]:
+        """The messages a chat request sends: system, history, then the new input."""
+        messages = [self.system_message()]
+        messages.extend(
+            message.model_dump()
+            for message in self.session_manager.get_messages()
         )
+        if user_input is not None:
+            messages.append({"role": "user", "content": user_input})
+        return messages
+
+    def context_window(self) -> tuple[int, bool]:
+        """The model's context window, and whether the endpoint reported it.
+
+        The endpoint's own figure wins; the configured value is only the
+        fallback for servers that don't publish one.
+        """
+        if self.provider is not None and self.config.model.strip():
+            reported = self.provider.context_window(self.config.model)
+            if reported:
+                return reported, True
+        return self.config.context_window_tokens, False
+
+    def context_breakdown(self) -> dict[str, int]:
+        """Estimated tokens the next request uses, by where they come from.
+
+        Counts what is actually sent — system prompt, tool definitions and
+        the conversation — not just the saved messages.
+        """
+        system = estimate_request_tokens([self.system_message()])
+        tools = estimate_request_tokens([], self.tool_registry.schemas())
+        conversation = estimate_request_tokens(
+            [message.model_dump() for message in self.session_manager.get_messages()]
+        )
+        return {
+            "system": system,
+            "tools": tools,
+            "conversation": conversation,
+            "total": system + tools + conversation,
+        }
+
+    def compact_threshold(self, window: int) -> int:
+        """Tokens above which the conversation is compacted automatically.
+
+        The rest of the window is left for the reply.
+        """
+        return window - max(1024, window // 8)
+
+    def context_bar(self) -> Text:
+        """One line: a meter of the context used, then the numbers."""
+        used = self.context_breakdown()["total"]
+        window, reported = self.context_window()
+        ratio = min(1.0, used / window) if window else 0.0
+        color = ERROR if ratio >= 0.9 else WARNING if ratio >= 0.75 else GREEN_VIVID
+
+        numbers = Text()
+        numbers.append(f" ≈{format_tokens(used)} / {format_tokens(window)}", style=TEXT)
+        numbers.append(f" · {ratio * 100:.0f}%", style=color)
+        if not reported:
+            numbers.append(" · window from config", style=MUTED)
+
+        label = "context "
+        cells = min(
+            CONTEXT_BAR_CELLS,
+            max(CONTEXT_BAR_MIN_CELLS, self.console.width - len(label) - numbers.cell_len - 1),
+        )
+        filled = max(1, round(ratio * cells)) if used else 0
+
+        bar = Text()
+        bar.append(label, style=MUTED)
+        bar.append("━" * filled, style=color)
+        bar.append("─" * (cells - filled), style=BORDER)
+        bar.append_text(numbers)
+        return bar
+
+    def show_context(self) -> None:
+        """Show how much of the context window the next request uses."""
+        parts = self.context_breakdown()
+        window, reported = self.context_window()
+        messages = self.session_manager.get_messages()
+        tool_count = len(self.tool_registry.schemas())
+
+        content = Text()
+        content.append_text(self.context_bar())
+        content.append("\n\n")
+        rows = [
+            ("System prompt", parts["system"]),
+            (f"Tool definitions ({tool_count})", parts["tools"]),
+            (f"Conversation ({len(messages)} messages)", parts["conversation"]),
+        ]
+        for label, tokens in rows:
+            content.append(f"{label:<28}", style=f"bold {GREEN}")
+            content.append(f"{tokens:>9,}\n", style=TEXT)
+        content.append(f"{'Next request':<28}", style=f"bold {PINK_LIGHT}")
+        content.append(f"{parts['total']:>9,}\n", style=f"bold {TEXT}")
+        content.append(f"{'Context window':<28}", style=f"bold {GREEN}")
+        content.append(f"{window:>9,}", style=TEXT)
+        content.append(
+            "  reported by the endpoint" if reported else "  from config (endpoint doesn't say)",
+            style=MUTED,
+        )
+        content.append(f"\n{'Auto-compacts above':<28}", style=f"bold {GREEN}")
+        content.append(f"{self.compact_threshold(window):>9,}", style=TEXT)
+
         self.console.print(
             Panel(
                 content,
-                title=f"[bold {PINK_LIGHT}]Context[/bold {PINK_LIGHT}]",
+                title=f"[bold {PINK_LIGHT}]Context · {self.session_manager.name}[/bold {PINK_LIGHT}]",
                 border_style=BORDER,
                 box=ROUNDED,
                 padding=(0, 1),
             )
         )
         self.console.print(
-            f"[{MUTED}]Estimates, not billing: token counts are approximated "
-            f"locally, not reported by the endpoint. /compact to summarise now.[/]"
+            f"[{MUTED}]Estimates, not billing: tokens are counted locally at about "
+            f"four characters each. /compact to summarise now.[/]"
         )
 
     def show_sessions(self) -> None:
@@ -1181,6 +1416,51 @@ class NrgrdApp:
         save_system_prompt(replacement)
         self.console.print(f"[{PINK_LIGHT}]● System prompt saved[/]")
 
+    def open_neurochat(self) -> None:
+        """Open NeuroChat in the default browser, connected like nrgrd is."""
+        if not self.config.base_url.strip() or not self.api_key.strip():
+            self.print_missing_api_key()
+            return
+
+        link = neurochat_link(self.config.base_url, self.api_key)
+        # A clickable label rather than the raw URL: the link carries the
+        # API key, and this way it never lands in the scrollback.
+        clickable = Text(
+            "Open NeuroChat ↗",
+            style=Style(color=GREEN_VIVID, bold=True, underline=True, link=link),
+        )
+
+        if open_url(link):
+            self.console.print(
+                Text.assemble(
+                    ("● Opened NeuroChat in your browser on this connection. ", GREEN_VIVID),
+                    ("It starts a new chat; this conversation stays here.", MUTED),
+                )
+            )
+            self.console.print(Text.assemble(("  ", ""), clickable))
+            return
+
+        # No browser here (an SSH session, a headless box): hand over the
+        # link instead. It carries the API key, so say so.
+        self.console.print(
+            Panel(
+                Group(
+                    clickable,
+                    Text(""),
+                    Text(link, style=TEXT),
+                    Text(""),
+                    Text(
+                        "This link contains your API key. Open it yourself and don't share it.",
+                        style=WARNING,
+                    ),
+                ),
+                title=f"[bold {PINK_LIGHT}]Couldn't open a browser[/bold {PINK_LIGHT}]",
+                border_style=BORDER,
+                box=ROUNDED,
+                padding=(0, 1),
+            )
+        )
+
     def print_missing_api_key(
         self,
     ) -> None:
@@ -1228,9 +1508,10 @@ class NrgrdApp:
                 self.console.print(f"[{MUTED}]Not enough conversation to compact.[/]")
             return False
 
+        window, _ = self.context_window()
         keep_budget = min(
             self.config.compact_keep_recent_tokens,
-            max(512, self.config.context_window_tokens // 2),
+            max(512, window // 2),
         )
         tail_tokens = 0
         split_index = len(messages)
@@ -1300,13 +1581,11 @@ class NrgrdApp:
         self.console.print(f"[{PINK_LIGHT}]● {label}[/]")
         return True
 
-    def should_auto_compact(self, user_input: str) -> bool:
+    def should_auto_compact(self, incoming_tokens: int) -> bool:
         """Return whether the next request would exceed the safe token budget."""
-        current_tokens = estimate_messages_tokens(self.session_manager.get_messages())
-        incoming_tokens = estimate_text_tokens(user_input) + 4
-        reserve_tokens = max(1024, self.config.context_window_tokens // 8)
-        threshold = self.config.context_window_tokens - reserve_tokens
-        return current_tokens + incoming_tokens >= threshold
+        current_tokens = self.context_breakdown()["total"]
+        window, _ = self.context_window()
+        return current_tokens + incoming_tokens >= self.compact_threshold(window)
 
     def ask_permission(self, name: str, arguments: str) -> str:
         """Prompt the user to approve an ``ask``-level tool call.
@@ -1373,6 +1652,18 @@ class NrgrdApp:
         )
 
         live: Live | None = None
+        # The whole reply so far. The Live display only shows its newest
+        # lines (see StreamTail); this is what gets printed once it stops.
+        reply: Panel | None = None
+
+        def reply_panel(text: str) -> Panel:
+            return Panel(
+                Markdown(text),
+                title=f"[bold {GREEN_VIVID}]Nrgrd[/bold {GREEN_VIVID}]",
+                border_style=GREEN_VIVID,
+                box=ROUNDED,
+                padding=(0, 1),
+            )
 
         def open_thinking_panel() -> Live:
             panel = Panel(
@@ -1387,29 +1678,31 @@ class NrgrdApp:
             return instance
 
         def close_live() -> None:
-            nonlocal live
+            nonlocal live, reply
             if live is not None:
+                if reply is not None:
+                    # Stopping redraws once, uncropped: hand it the whole
+                    # reply so the scrollback keeps every line of it.
+                    live.update(reply, refresh=False)
                 live.stop()
                 live = None
+            reply = None
 
         try:
             for event in agent.run(messages):
                 if isinstance(event, AssistantChunk):
                     if live is None:
                         live = open_thinking_panel()
-                    live.update(
-                        Panel(
-                            Markdown(event.text),
-                            title=f"[bold {GREEN_VIVID}]Nrgrd[/bold {GREEN_VIVID}]",
-                            border_style=GREEN_VIVID,
-                            box=ROUNDED,
-                            padding=(0, 1),
-                        )
-                    )
+                    reply = reply_panel(event.text)
+                    # Only the newest lines, so a reply taller than the
+                    # screen keeps scrolling instead of freezing.
+                    live.update(StreamTail(reply))
                 elif isinstance(event, (PermissionRequested, ToolCallStarted)):
                     # A running Live display redraws over anything printed
                     # beneath it, including the permission prompt.
                     close_live()
+                    if isinstance(event, ToolCallStarted):
+                        self._record_tool(event.name, event.arguments, "ran")
                 elif isinstance(event, ToolCallOutput):
                     is_mcp = event.name.startswith("mcp__")
                     self.console.print(
@@ -1424,6 +1717,7 @@ class NrgrdApp:
                     )
                 elif isinstance(event, ToolCallDenied):
                     close_live()
+                    self._record_tool(event.name, event.arguments, "denied")
                     self.console.print(
                         Panel(
                             f"[{MUTED}]Denied by user; the agent was told and will "
@@ -1448,6 +1742,7 @@ class NrgrdApp:
                     return event.text
                 elif isinstance(event, AgentError):
                     close_live()
+                    self.last_outcome = "limit" if event.limit_reached else "error"
                     self.print_error_panel(
                         event.message, event.detail, event.hint
                     )
@@ -1457,21 +1752,11 @@ class NrgrdApp:
 
         raise RuntimeError("Agent loop ended without a final response.")
 
-    def send_message(
-        self,
-        user_input: str,
-    ) -> None:
-        """
-        Send a message and stream the response.
-        """
-
-        # Pessimistic until the agent reports otherwise: every early return
-        # below is a failure as far as a script calling nrgrd is concerned.
-        self.last_outcome = "error"
-
+    def ready_to_send(self) -> bool:
+        """Whether a model can be reached; explains what's missing if not."""
         if self.provider is None:
             self.print_missing_api_key()
-            return
+            return False
 
         if not self.config.model.strip():
             self.console.print(
@@ -1482,68 +1767,71 @@ class NrgrdApp:
                     box=ROUNDED,
                 )
             )
-            return
+            return False
+        return True
 
-        if self.should_auto_compact(user_input):
+    def send_message(
+        self,
+        user_input: str,
+        echo: bool = True,
+        label: str | None = None,
+    ) -> str:
+        """
+        Send a message and stream the response.
+
+        Files waiting in /attach go with it. ``echo`` shows the message in a
+        User panel; ``label`` names the turn in the conversation graph
+        (/goal sends its own wording but files the turn under the goal).
+        Returns the reply, empty when there is none.
+        """
+
+        # Pessimistic until the agent reports otherwise: every early return
+        # below is a failure as far as a script calling nrgrd is concerned.
+        self.last_outcome = "error"
+
+        if not self.ready_to_send():
+            return ""
+
+        attachments = list(self.pending_attachments)
+        content, saved_text = build_user_content(user_input, attachments)
+
+        incoming = estimate_request_tokens([{"role": "user", "content": content}])
+        if self.should_auto_compact(incoming):
             self.compact_conversation(automatic=True)
 
-        self.console.print(
-            Panel(
-                Markdown(user_input),
-                title=f"[bold {ERROR}]User[/bold {ERROR}]",
-                border_style=ERROR,
-                box=ROUNDED,
-                padding=(0, 1),
+        if echo:
+            body: Any = Markdown(user_input)
+            if attachments:
+                body = Group(
+                    body,
+                    Text(
+                        "📎 " + " · ".join(f"{item.name} ({item.size_label})" for item in attachments),
+                        style=MUTED,
+                    ),
+                )
+            self.console.print(
+                Panel(
+                    body,
+                    title=f"[bold {ERROR}]User[/bold {ERROR}]",
+                    border_style=ERROR,
+                    box=ROUNDED,
+                    padding=(0, 1),
+                )
             )
-        )
 
-        system_prompt = (
-            load_system_prompt()
-        )
+        messages = self.build_request_messages()
+        messages.append({"role": "user", "content": content})
 
-        messages: list[
-            dict[str, Any]
-        ] = [
-            {
-                "role": "system",
-                "content": (
-                    system_prompt
-                    + "\n\n"
-                    + self.workspace.summary()
-                    + "\n\nYou are a coding assistant. Search and read files before "
-                    "editing them. Keep changes scoped to the user's request, report "
-                    "what you changed, and never claim a file or command action "
-                    "unless a tool confirmed it. Use git_status/git_diff to check "
-                    "your work and, when practical, run relevant tests or builds "
-                    "with the shell tool to validate a change. Use only the exact "
-                    "tool names declared in this request; never infer or invent a "
-                    "tool such as delete_file. Some tools require the user's "
-                    "explicit approval before they run and may be denied — if one "
-                    "is denied, do not retry it; explain the limitation and adjust "
-                    "your approach. If the requested operation has no declared "
-                    "tool, state that limitation clearly."
-                ),
-            }
-        ]
+        graph = self._open_graph()
+        turn = graph.start_turn(label or user_input) if graph else None
+        self._graph_turn = (graph, turn) if graph and turn else None
 
-        messages.extend(
-            message.model_dump()
-            for message in self.session_manager.get_messages()
-        )
-
-        messages.append(
-            {
-                "role": "user",
-                "content": user_input,
-            }
-        )
-
+        response_text = ""
         try:
             response_text = self.run_coding_agent(messages)
         except KeyboardInterrupt:
             self.last_outcome = "cancelled"
             self.console.print(f"[{PINK}]Generation interrupted; nothing was saved.[/]")
-            return
         except Exception as error:
             self.console.print(
                 Panel(
@@ -1554,11 +1842,296 @@ class NrgrdApp:
                     padding=(0, 1),
                 )
             )
-            return
+        finally:
+            self._graph_turn = None
+            if graph and turn:
+                graph.finish_turn(turn, response_text, self.last_outcome)
+                self._save_graph(graph)
 
         if response_text.strip():
-            self.session_manager.add_message("user", user_input)
+            self.session_manager.add_message("user", saved_text)
             self.session_manager.add_message("assistant", response_text)
+            self.pending_attachments.clear()
+        elif attachments:
+            self.console.print(
+                f"[{MUTED}]Your attachments are still attached; they go with your next message.[/]"
+            )
+        return response_text
+
+    # --- conversation graph (beta) -----------------------------------------
+
+    def _open_graph(self) -> ConversationGraph | None:
+        try:
+            return ConversationGraph(self.session_manager.get_graph_path())
+        except OSError:
+            return None
+
+    def _save_graph(self, graph: ConversationGraph) -> None:
+        try:
+            graph.save()
+        except OSError:
+            pass  # The graph is a nicety; a full disk must not fail the turn.
+
+    def _record_tool(self, name: str, arguments: str, status: str) -> None:
+        if self._graph_turn is not None:
+            graph, turn = self._graph_turn
+            graph.add_tool(turn, name, arguments, status)
+
+    def show_graph(self) -> None:
+        """Draw this session's turns, the tools each used, and the files they touched."""
+        graph = self._open_graph()
+        turns = graph.turns() if graph else []
+        if not graph or not turns:
+            self.console.print(
+                f"[{MUTED}]No graph yet for this session — it fills in as you chat. (beta)[/]"
+            )
+            return
+
+        tool_count = sum(1 for node in graph.nodes if node["type"] == "tool")
+        files = graph.file_summary()
+        self.console.print(
+            Panel(
+                render_graph(graph, self.console.width - 4, GRAPH_MAX_TURNS),
+                title=f"[bold {PINK_LIGHT}]Conversation graph · beta[/bold {PINK_LIGHT}]",
+                subtitle=(
+                    f"[{MUTED}]{self.session_manager.name} · {len(turns)} turns · "
+                    f"{tool_count} tool calls · {len(files)} files[/]"
+                ),
+                border_style=BORDER,
+                box=ROUNDED,
+                padding=(0, 1),
+            )
+        )
+        self.console.print(f"[{MUTED}]Saved as JSON: {graph.path}[/]")
+
+    # --- /goal ---------------------------------------------------------------
+
+    def run_goal(self, goal: str) -> None:
+        """Keep the agent working, round after round, until the goal is met."""
+        goal = goal.strip()
+        if not goal:
+            self.console.print(
+                f"[{MUTED}]Usage: /goal <objective> — nrgrd keeps working until it's done. "
+                "Ctrl+C stops it.[/]"
+            )
+            return
+        if not self.ready_to_send():
+            return
+
+        self.console.print(
+            Panel(
+                Markdown(goal),
+                title=f"[bold {PINK}]Goal[/bold {PINK}]",
+                subtitle=f"[{MUTED}]runs until it's done · Ctrl+C stops[/]",
+                border_style=PINK,
+                box=ROUNDED,
+                padding=(0, 1),
+            )
+        )
+
+        try:
+            for round_number in itertools.count(1):
+                if round_number == 1:
+                    prompt = GOAL_START.format(goal=goal)
+                    label = f"Goal: {goal}"
+                else:
+                    prompt = GOAL_CONTINUE.format(goal=goal)
+                    label = f"Goal · round {round_number}"
+                    self.console.print(
+                        f"[{PINK_LIGHT}]● Goal · round {round_number}[/] "
+                        f"[{MUTED}]not there yet, continuing…[/]"
+                    )
+
+                reply = self.send_message(prompt, echo=False, label=label)
+
+                if self.last_outcome == "cancelled":
+                    self.console.print(f"[{WARNING}]● Goal stopped.[/]")
+                    return
+                if self.last_outcome == "error":
+                    self.console.print(f"[{ERROR}]● Goal stopped: the last request failed.[/]")
+                    return
+
+                verdict, reason = goal_verdict(reply)
+                if verdict == "done":
+                    self.console.print(
+                        f"[bold {GREEN_VIVID}]● Goal achieved[/] "
+                        f"[{MUTED}]after {round_number} round{'s' if round_number > 1 else ''}.[/]"
+                    )
+                    return
+                if verdict == "blocked":
+                    self.console.print(
+                        f"[{WARNING}]● Goal blocked:[/] {reason or 'the agent needs your input.'}"
+                    )
+                    return
+        except KeyboardInterrupt:
+            self.console.print(f"[{WARNING}]● Goal stopped.[/]")
+
+    # --- attachments -------------------------------------------------------
+
+    def add_attachment(self, item: Attachment) -> None:
+        self.pending_attachments.append(item)
+        self.console.print(
+            f"[{GREEN_VIVID}]📎 Attached {item.name}[/] [{MUTED}]({item.size_label}) — "
+            "goes with your next message.[/]"
+        )
+
+    def attach_paths(self, raw: str) -> None:
+        """/attach <path> [path…]"""
+        try:
+            tokens = shlex.split(raw, posix=sys.platform != "win32")
+        except ValueError:
+            tokens = raw.split()
+        for token in tokens:
+            path = Path(os.path.expanduser(token.strip('"')))
+            if not path.is_absolute():
+                path = self.working_directory / path
+            try:
+                item = load_attachment(path, display_name(path, self.working_directory))
+            except AttachmentError as error:
+                self.console.print(f"[{ERROR}]● {error}[/]")
+                continue
+            self.add_attachment(item)
+
+    def show_attachments(self) -> None:
+        if not self.pending_attachments:
+            self.console.print(
+                f"[{MUTED}]Nothing attached. /attach <path>, paste or drag a file in, "
+                "or Ctrl+V an image.[/]"
+            )
+            return
+        for item in self.pending_attachments:
+            self.console.print(f"[{GREEN_VIVID}]📎 {item.name}[/] [{MUTED}]({item.size_label})[/]")
+        self.console.print(f"[{MUTED}]They go with your next message. /attach clear drops them.[/]")
+
+    def attach_clipboard_image(self) -> bool:
+        """/paste: attach the clipboard's image. Returns whether one was attached."""
+        try:
+            image = clipboard_image()
+        except ClipboardUnavailable as error:
+            self.console.print(f"[{WARNING}]● {error}[/]")
+            return False
+        if not image:
+            self.console.print(f"[{MUTED}]There's no image on the clipboard.[/]")
+            return False
+        count = sum(1 for item in self.pending_attachments if item.name.startswith("clipboard-"))
+        try:
+            self.add_attachment(image_attachment(f"clipboard-{count + 1}.png", image))
+        except AttachmentError as error:
+            self.console.print(f"[{ERROR}]● {error}[/]")
+            return False
+        return True
+
+    def paste_into(self, buffer: Any) -> None:
+        """Ctrl+V: an image on the clipboard is attached; text is typed in."""
+        try:
+            has_image = bool(clipboard_image())
+            problem = None
+        except ClipboardUnavailable as error:
+            has_image, problem = False, str(error)
+
+        if has_image:
+            run_in_terminal(self.attach_clipboard_image)
+            return
+        text = clipboard_text()
+        if text:
+            self.paste_text_into(buffer, text)
+        elif problem:
+            run_in_terminal(lambda: self.console.print(f"[{WARNING}]● {problem}[/]"))
+
+    def paste_text_into(self, buffer: Any, text: str) -> None:
+        """Paste or drop: a paste that is only file paths attaches those files."""
+        paths = pasted_paths(text, self.working_directory)
+        if paths:
+            run_in_terminal(lambda: self.attach_paths(" ".join(shlex.quote(str(p)) for p in paths)))
+            return
+        buffer.insert_text(text.replace("\r\n", "\n").replace("\r", "\n"))
+
+    # --- updates -----------------------------------------------------------
+
+    def start_update_check(self) -> None:
+        """Ask PyPI, in the background, whether a newer nrgrd exists."""
+        if update_check_disabled():
+            return
+        cache = get_config_path().parent / "update-check.json"
+
+        def check() -> None:
+            latest = cached_latest_version(cache)
+            if latest and is_newer(latest, __version__):
+                self.update_available = latest
+
+        threading.Thread(target=check, name="nrgrd-update-check", daemon=True).start()
+
+    def show_update_notice(self) -> None:
+        if self.update_available and not self._update_notice_shown:
+            self._update_notice_shown = True
+            self.console.print(
+                f"[{GREEN_VIVID}]● nrgrd {self.update_available} is available[/] "
+                f"[{MUTED}](you have {__version__}). Run /update to upgrade.[/]"
+            )
+
+    def run_update(self) -> None:
+        """/update: compare with PyPI and offer to upgrade in place."""
+        with Live(
+            Spinner("dots12", text="Checking PyPI…", style=PINK_LIGHT),
+            console=self.console,
+            transient=True,
+        ):
+            latest = fetch_latest_version()
+
+        if latest is None:
+            self.console.print(
+                f"[{ERROR}]● Couldn't reach PyPI.[/] [{MUTED}]Check {PYPI_PAGE_URL} yourself.[/]"
+            )
+            return
+        if not is_newer(latest, __version__):
+            self.console.print(
+                f"[{GREEN_VIVID}]● You're on the latest nrgrd[/] "
+                f"[{MUTED}]({__version__}; PyPI has {latest}).[/]"
+            )
+            return
+
+        command = upgrade_command()
+        how = (
+            f"[bold]{shlex.join(command)}[/bold]"
+            if command
+            else "[bold]git pull[/bold] in your nrgrd checkout (you're running from source)"
+        )
+        self.console.print(
+            Panel(
+                f"nrgrd [bold {GREEN_VIVID}]{latest}[/bold {GREEN_VIVID}] is out — you have "
+                f"{__version__}.\n\nTo upgrade this installation: {how}\n\n"
+                f"[{MUTED}]Installed another way? uv tool upgrade nrgrd · pipx upgrade nrgrd · "
+                f"pip install --upgrade nrgrd\nWhat's new: {PYPI_PAGE_URL}[/]",
+                title=f"[bold {PINK_LIGHT}]Update available[/bold {PINK_LIGHT}]",
+                border_style=BORDER,
+                box=ROUNDED,
+                padding=(0, 1),
+            )
+        )
+        if command is None:
+            return
+        if sys.platform == "win32":
+            # Windows locks a running program's files, so the upgrade can't
+            # replace nrgrd while it's open.
+            self.console.print(f"[{MUTED}]Exit nrgrd first, then run the command above.[/]")
+            return
+        try:
+            answer = Prompt.ask("Upgrade now?", choices=["y", "n"], default="y", console=self.console)
+        except (KeyboardInterrupt, EOFError):
+            return
+        if answer != "y":
+            return
+        try:
+            result = subprocess.run(command, stdin=subprocess.DEVNULL)
+        except OSError as error:
+            self.console.print(f"[{ERROR}]● Couldn't run {command[0]}: {error}[/]")
+            return
+        if result.returncode == 0:
+            self.console.print(
+                f"[{GREEN_VIVID}]● Upgraded to {latest}.[/] [{MUTED}]Restart nrgrd to use it.[/]"
+            )
+        else:
+            self.console.print(f"[{ERROR}]● The upgrade failed (exit code {result.returncode}).[/]")
 
 
 def main() -> None:
