@@ -27,8 +27,6 @@ from nrgrd.agent.permissions import PermissionManager
 from nrgrd.api.provider import ModelProvider, ProviderError
 from nrgrd.tools.registry import PermissionLevel, ToolRegistry
 
-MAX_ITERATIONS = 12
-
 
 class Agent:
     def __init__(
@@ -37,7 +35,9 @@ class Agent:
         model: str,
         tool_registry: ToolRegistry,
         permissions: PermissionManager | None = None,
-        max_iterations: int = MAX_ITERATIONS,
+        # None: keep going until the model stops calling tools. A caller
+        # that wants a hard stop (a script, a test) passes a number.
+        max_iterations: int | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -50,7 +50,8 @@ class Agent:
         """Run the tool-use loop, mutating ``messages`` in place."""
         yield AgentStarted()
 
-        for _ in range(self.max_iterations):
+        rounds = itertools.count() if self.max_iterations is None else range(self.max_iterations)
+        for _ in rounds:
             response_text = ""
             tool_calls: dict[int, dict[str, str]] = {}
 
@@ -178,5 +179,6 @@ class Agent:
                 return
 
         yield AgentError(
-            "Tool call limit reached; please continue with a narrower request."
+            "Tool call limit reached; please continue with a narrower request.",
+            limit_reached=True,
         )

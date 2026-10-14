@@ -133,6 +133,10 @@ class SessionManager:
             .get_session_path()
         )
 
+    def get_graph_path(self) -> Path:
+        """Return where this session's conversation graph is kept."""
+        return self.store.graph_path
+
     def get_size_bytes(
         self,
     ) -> int:

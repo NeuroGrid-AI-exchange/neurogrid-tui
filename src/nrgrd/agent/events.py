@@ -59,6 +59,9 @@ class AgentError:
     message: str
     detail: str = ""
     hint: str = ""
+    # The turn ran out of tool calls rather than failing. Work so far is on
+    # disk, so a caller that keeps going (/goal) can simply continue.
+    limit_reached: bool = False
 
 
 @dataclass(frozen=True)

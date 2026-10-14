@@ -88,6 +88,22 @@ class WorkspaceSessionStore:
             / f"{self.workspace_id}--{slugify(name)}.json"
         )
 
+    def graph_path_for(self, name: str) -> Path:
+        """Return the conversation graph kept for a named session.
+
+        In its own folder: a second ``*.json`` beside the sessions would be
+        listed as a session.
+        """
+        return (
+            self.sessions_directory
+            / "graphs"
+            / f"{self.workspace_id}--{slugify(name)}.json"
+        )
+
+    @property
+    def graph_path(self) -> Path:
+        return self.graph_path_for(self.name)
+
     def create_workspace_id(
         self,
     ) -> str:
@@ -277,6 +293,7 @@ class WorkspaceSessionStore:
 
         if self.session_path.exists():
             self.session_path.unlink()
+        self.graph_path.unlink(missing_ok=True)
 
     def get_size_bytes(
         self,
@@ -323,6 +340,11 @@ class WorkspaceSessionStore:
         if target.exists():
             return False
 
+        old_graph = self.graph_path
+        new_graph = self.graph_path_for(new_name)
+        if old_graph.exists() and not new_graph.exists():
+            old_graph.rename(new_graph)
+
         if self.session_path.exists():
             messages = self.load_messages()
             self.session_path.unlink()
@@ -341,6 +363,7 @@ class WorkspaceSessionStore:
         if not path.exists():
             return False
         path.unlink()
+        self.graph_path_for(name).unlink(missing_ok=True)
         return True
 
     def ensure_exists(self) -> None:

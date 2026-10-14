@@ -24,6 +24,28 @@ from nrgrd.api.provider import ChatDelta, ModelProvider, ProviderError, ToolCall
 
 DEFAULT_TIMEOUT_SECONDS = 120.0
 
+# Looking up the context window is a nicety shown before every prompt, so it
+# gets a short leash: a slow endpoint must never hold up the input line.
+CONTEXT_LOOKUP_TIMEOUT_SECONDS = 5.0
+
+# Where OpenAI-compatible servers put a model's context window in GET
+# /models — vLLM: max_model_len · OpenRouter: context_length · LM Studio:
+# max_context_length. The official OpenAI API publishes none of them.
+CONTEXT_WINDOW_FIELDS = (
+    "max_model_len",
+    "context_length",
+    "max_context_length",
+    "context_window",
+)
+
+
+def _context_window_of(item: Any) -> int | None:
+    for field in CONTEXT_WINDOW_FIELDS:
+        value = item.get(field) if isinstance(item, dict) else getattr(item, field, None)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
 
 class OpenAICompatibleProvider(ModelProvider):
     name = "OpenAI-compatible"
@@ -43,13 +65,40 @@ class OpenAICompatibleProvider(ModelProvider):
             timeout=timeout,
             max_retries=1,
         )
+        # model id -> context window (None when the server doesn't say).
+        # Filled once per provider; a new endpoint or key builds a new one.
+        self._context_windows: dict[str, int | None] | None = None
 
     def list_models(self) -> list[str]:
         try:
             response = self._client.models.list()
         except Exception as error:
             raise self._describe(error, model=None) from error
+        self._remember_context_windows(response.data)
         return sorted(item.id for item in response.data)
+
+    def context_window(self, model: str) -> int | None:
+        if self._context_windows is None:
+            client = self._client
+            if hasattr(client, "with_options"):
+                client = client.with_options(
+                    timeout=CONTEXT_LOOKUP_TIMEOUT_SECONDS, max_retries=0
+                )
+            try:
+                response = client.models.list()
+            except Exception:
+                # Only informational: remember the miss rather than asking
+                # again before every prompt.
+                self._context_windows = {}
+            else:
+                self._remember_context_windows(response.data)
+        return self._context_windows.get(model)
+
+    def _remember_context_windows(self, items: Any) -> None:
+        self._context_windows = {
+            str(item.get("id") if isinstance(item, dict) else item.id): _context_window_of(item)
+            for item in items
+        }
 
     def stream_chat(
         self,
