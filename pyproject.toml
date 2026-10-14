@@ -58,3 +58,9 @@ fallback-version = "0.0.0"
 [tool.hatch.version.raw-options]
 # PyPI rejects local versions (the "+g1a2b3c" suffix on untagged commits).
 local_scheme = "no-local-version"
+
+# The version comes from git, so a checkout must be rebuilt when the commit
+# or tags change; otherwise `uv run` keeps reporting the version it was first
+# installed at.
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
