@@ -17,11 +17,18 @@ tools.
 - **Coding agent** — An iterative tool-use loop (`nrgrd.agent`) that reads, searches, edits, and runs commands in your repository until the task is done.
 - **Workspace aware** — Detects git, language, package manager, and test framework at startup, so the agent doesn't waste turns rediscovering your project.
 - **Interruptible** — Ctrl+C stops generation or a running tool without corrupting the conversation, keeping whatever was produced.
+- **Goals** — `/goal <objective>` keeps the agent working, round after round, until it reports the goal achieved or blocked. No iteration limit; Ctrl+C stops it.
+- **Real context usage** — A bar above the input shows how much of the model's context window the next request uses, counting the system prompt and tool definitions too. The window comes from the endpoint (`max_model_len`, `context_length`, …) when it reports one.
+- **Images and files** — Attach them with `/attach`, Ctrl+V an image from the clipboard, or drag a file onto the terminal. Images go to vision models; text files are inlined.
+- **Conversation graph (beta)** — `/graph` draws the session in the terminal: each turn, the tools it used, and the files they read or wrote. Also saved as JSON.
+- **Long replies keep scrolling** — Output taller than the terminal scrolls as it streams, and the full reply stays in the scrollback.
+- **NeuroChat** — `/neurochat` opens the same endpoint and key in [NeuroChat](https://chat.neurogrid.cc) in your browser.
+- **Update notices** — nrgrd tells you when PyPI has a newer version; `/update` upgrades it.
 - **Named sessions** — Several conversations per project: list, resume, rename, delete.
 - **CLI mode** — `nrgrd "fix the failing tests"` runs headless on the same runtime, for scripts and CI.
 - **Native tools** — `list_files`, `read_file`, `write_file`, `edit_file`, `search`, `shell`, `git_status`, `git_diff`.
 - **Permissions** — Read-only tools run automatically; file writes, shell commands, and MCP tools ask for approval first (or "always allow" for the session).
-- **Immersive TUI** — Rich-rendered panels, streaming output, and slash-command completion.
+- **Immersive TUI** — Rich-rendered panels, streaming output, and slash-command completion with each command's description shown under the input.
 - **Persistent sessions** — Saves conversation context and history locally.
 - **Any compatible endpoint** — Behind a `ModelProvider` abstraction: a NeuroGrid deployment, vLLM, Ollama, LM Studio, or anything else speaking the same API. All nrgrd needs is a URL, a key, and a model name.
 - **Keys kept out of the config file** — The API key lives in your OS credential store, and never appears in errors or logs.
@@ -39,8 +46,19 @@ nrgrd
 ```
 
 `uv tool install` puts `nrgrd` on your PATH in its own environment, and
-downloads a suitable Python if you don't have one. Update with
-`uv tool upgrade nrgrd`. If you prefer pipx: `pipx install nrgrd`.
+downloads a suitable Python if you don't have one. If you prefer pipx:
+`pipx install nrgrd`.
+
+### Updating
+
+nrgrd checks PyPI at startup (at most once a day) and tells you when a new
+version is out. Run `/update` inside nrgrd, or upgrade the way you installed it:
+
+```bash
+uv tool upgrade nrgrd          # uv
+pipx upgrade nrgrd             # pipx
+pip install --upgrade nrgrd    # pip
+```
 
 Don't have uv? See [installing uv](https://docs.astral.sh/uv/getting-started/installation/).
 
@@ -67,12 +85,30 @@ nrgrd --yes "run the tests"        # approve gated tools automatically (CI)
 | Command | What it does |
 |---|---|
 | `/help` | List every command |
+| `/goal <objective>` | Keep working until the objective is done (Ctrl+C stops) |
+| `/attach <path>…`, `/attach clear`, `/paste` | Attach files or the clipboard image to your next message |
+| `/graph` | Draw the conversation graph (beta) |
+| `/context` | What the next request sends and how much of the window it uses |
+| `/compact [focus]` | Summarise older conversation |
 | `/config`, `/config edit` | Show or change the connection |
 | `/con`, `/models` | Check the endpoint, list its models |
 | `/tools`, `/permissions` | Show tools and how each is gated |
 | `/session list`, `/session new\|resume\|rename\|delete <name>` | Manage sessions |
-| `/diff`, `/context`, `/compact` | Review changes, context usage, summarise |
+| `/diff` | Show the working tree diff |
+| `/neurochat` | Open this connection in NeuroChat in your browser |
+| `/update` | Check for and install a newer nrgrd |
 | `/mcp`, `/mcp edit`, `/mcp reload` | Manage MCP servers |
+
+While typing a command, the line under the input describes the one
+highlighted in the menu.
+
+### Images and files
+
+`/attach screenshot.png notes.md` sends files with your next message;
+pasting or dragging a file's path does the same. Ctrl+V (or `/paste`)
+attaches an image from the clipboard — on Linux that needs `xclip` (X11)
+or `wl-clipboard` (Wayland); macOS and Windows need nothing extra.
+Images only work with models that accept them.
 
 ## Configuration
 
@@ -96,7 +132,8 @@ to an owner-only (`0600`) file, and `/config` tells you which is in use. A
 key left over in an older plaintext `config.json` is migrated out
 automatically on startup.
 
-No environment variables are involved.
+No environment variables are needed. `NRGRD_NO_UPDATE_CHECK=1` turns off
+the startup check for new versions.
 
 ## Project structure
 
@@ -130,8 +167,8 @@ Push a version tag. CI runs the tests, builds, checks the built version
 matches the tag, and publishes to PyPI and GitHub Releases:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 The version comes from the tag; there is no version number to edit in
